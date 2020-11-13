@@ -8,3 +8,8 @@ edition = "2018"
 
 [dependencies]
 dynasmrt = "1.0"
+bitflags = "1.2"
+thiserror = "1.0"
+anyhow = "1.0"
+bit_field = "0.10"
+byteorder = "1.3"

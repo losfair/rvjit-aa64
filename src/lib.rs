@@ -1,7 +1,8 @@
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
-    }
-}
+#![feature(cell_update, global_asm)]
+
+pub mod codegen;
+pub mod runtime;
+pub mod config;
+pub mod translation;
+pub mod error;
+pub mod entry_exit;
