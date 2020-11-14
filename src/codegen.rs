@@ -115,9 +115,17 @@ impl<'a> Codegen<'a> {
 
                     let label = self.relative_br_labels[dst_offset as usize].clone();
                     let (rs, rt, rs_h, rt_h) = self.spill.map_register_tuple_r_r(&mut self.a, i_rs(inst) as _, i_rt(inst) as _);
-                    self.emit_btype(vpc, inst, rs, rt, label);
+
+                    dynasm!(self.a
+                        ; .arch aarch64
+                        ; cmp X(rs as u32), X(rt as u32)
+                    );
+
+                    // We are leaving. Release handles now.
                     self.spill.release_register_r(&mut self.a, rs_h);
                     self.spill.release_register_r(&mut self.a, rt_h);
+
+                    self.emit_btype_late(vpc, inst, label);
                 }
             }
             0b0110111 => {
@@ -138,7 +146,7 @@ impl<'a> Codegen<'a> {
         }
     }
 
-    fn emit_btype(&mut self, vpc: u64, inst: u32, rs: usize, rt: usize, label: DynamicLabel) {
+    fn emit_btype_late(&mut self, vpc: u64, inst: u32, label: DynamicLabel) {
         match i_op(inst) {
             0b1100011 => {
                 match i_funct3(inst) {
@@ -146,7 +154,6 @@ impl<'a> Codegen<'a> {
                         // beq
                         dynasm!(self.a
                             ; .arch aarch64
-                            ; cmp X(rs as u32), X(rt as u32)
                             ; b.eq =>label
                         );
                     }
@@ -154,7 +161,6 @@ impl<'a> Codegen<'a> {
                         // bne
                         dynasm!(self.a
                             ; .arch aarch64
-                            ; cmp X(rs as u32), X(rt as u32)
                             ; b.ne =>label
                         );
                     }
@@ -162,7 +168,6 @@ impl<'a> Codegen<'a> {
                         // blt
                         dynasm!(self.a
                             ; .arch aarch64
-                            ; cmp X(rs as u32), X(rt as u32)
                             ; b.lt =>label
                         );
                     }
@@ -170,7 +175,6 @@ impl<'a> Codegen<'a> {
                         // bge
                         dynasm!(self.a
                             ; .arch aarch64
-                            ; cmp X(rs as u32), X(rt as u32)
                             ; b.ge =>label
                         );
                     }
@@ -178,7 +182,6 @@ impl<'a> Codegen<'a> {
                         // bltu
                         dynasm!(self.a
                             ; .arch aarch64
-                            ; cmp X(rs as u32), X(rt as u32)
                             ; b.lo =>label
                         );
                     }
@@ -186,7 +189,6 @@ impl<'a> Codegen<'a> {
                         // bgeu
                         dynasm!(self.a
                             ; .arch aarch64
-                            ; cmp X(rs as u32), X(rt as u32)
                             ; b.hs =>label
                         );
                     }
