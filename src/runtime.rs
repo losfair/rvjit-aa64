@@ -14,7 +14,7 @@ pub struct Runtime {
     pub memory_regs: [u64; 4],
     pub spill: [u64; 32],
     pub guest_save: [u64; 32],
-    pub sections: BTreeMap<u64, SectionRef>,
+    pub sections: Box<BTreeMap<u64, SectionRef>>,
 }
 
 impl Runtime {
@@ -52,7 +52,7 @@ impl Runtime {
             memory_regs: [0; 4],
             spill: [0; 32],
             guest_save: [0; 32],
-            sections: BTreeMap::new(),
+            sections: Box::new(BTreeMap::new()),
         }
     }
 

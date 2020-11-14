@@ -7,3 +7,4 @@ pub enum JitError {
 }
 
 pub const ERROR_REASON_UNDEFINED_INSTRUCTION: u16 = 1;
+pub const ERROR_REASON_BRANCH_OOB: u16 = 2;

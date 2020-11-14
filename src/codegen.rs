@@ -1,4 +1,4 @@
-use dynasmrt::{aarch64::Assembler, DynasmApi, dynasm};
+use dynasmrt::{aarch64::Assembler, DynasmApi, dynasm, DynamicLabel, DynasmLabelApi};
 use bit_field::BitField;
 use std::cell::Cell;
 use std::rc::Rc;
@@ -6,6 +6,7 @@ use crate::runtime::Runtime;
 use crate::error;
 use byteorder::{LittleEndian, ReadBytesExt};
 use crate::translation::Translation;
+use std::collections::BTreeMap;
 
 pub struct Codegen<'a> {
     a: Assembler,
@@ -13,13 +14,16 @@ pub struct Codegen<'a> {
     spill: SpillMachine,
     raw: &'a [u8],
     v_offset_to_translation_offset: Box<[u32]>,
+    exception_translation_offset_to_v_offset: BTreeMap<u32, u32>,
+    relative_br_labels: Box<[DynamicLabel]>,
 }
 
 impl<'a> Codegen<'a> {
     pub fn new(base_vpc: u64, raw: &'a [u8]) -> Codegen<'a> {
-        let a = Assembler::new().unwrap();
-        let offset_mapping_size = raw.len() / 2;
-        let v_offset_to_translation_offset = vec![std::u32::MAX; offset_mapping_size].into_boxed_slice();
+        let mut a = Assembler::new().unwrap();
+        let max_num_instructions = raw.len() / 2;
+        let v_offset_to_translation_offset = vec![std::u32::MAX; max_num_instructions].into_boxed_slice();
+        let relative_br_labels = (0..max_num_instructions).map(|_| a.new_dynamic_label()).collect::<Vec<_>>().into_boxed_slice();
 
         Codegen {
             a,
@@ -27,6 +31,8 @@ impl<'a> Codegen<'a> {
             spill: SpillMachine::new(),
             raw,
             v_offset_to_translation_offset,
+            exception_translation_offset_to_v_offset: BTreeMap::new(),
+            relative_br_labels,
         }
     }
 
@@ -34,7 +40,14 @@ impl<'a> Codegen<'a> {
         let mut cursor = self.raw;
         let mut vpc = self.base_vpc;
         while let Ok(x) = cursor.read_u32::<LittleEndian>() {
-            self.v_offset_to_translation_offset[((vpc - self.base_vpc) / 2) as usize] = self.a.offset().0 as u32;
+            let inst_offset = ((vpc - self.base_vpc) / 2) as usize;
+            let label = self.relative_br_labels[inst_offset];
+            self.v_offset_to_translation_offset[inst_offset] = self.a.offset().0 as u32;
+
+            dynasm!(self.a
+                ; .arch aarch64
+                ; =>label
+            );
             self.emit_once(vpc, x);
             vpc += 4;
         }
@@ -44,6 +57,7 @@ impl<'a> Codegen<'a> {
         Translation {
             backing: self.a,
             v_offset_to_translation_offset: self.v_offset_to_translation_offset,
+            exception_translation_offset_to_v_offset: self.exception_translation_offset_to_v_offset,
         }
     }
 
@@ -51,41 +65,214 @@ impl<'a> Codegen<'a> {
         match i_op(inst) {
             0b0010011 => {
                 // arith-i 32-bit
-                match i_funct3(inst) {
-                    0b000 => {
-                        // addi
-                        let (rd, rs, rd_h, rs_h) = self.spill.map_register_tuple(&mut self.a, i_rd(inst) as _, i_rs(inst) as _);
-                        let imm = i_itype_imm(inst);
-                        dynasm!(self.a
-                            ; .arch aarch64
-                            ; adds W(rd as u32), W(rs as u32), (imm as u32)
-                        );
-                        self.spill.release_register_r(&mut self.a, rs_h);
-                        self.spill.release_register_w(&mut self.a, rd_h);
+                let (rd, rs, rd_h, rs_h) = self.spill.map_register_tuple_w_r(&mut self.a, i_rd(inst) as _, i_rs(inst) as _);
+                let imm = i_itype_imm(inst);
+
+                self.emit_itype(vpc, inst, rd, rs, imm);
+
+                self.spill.release_register_r(&mut self.a, rs_h);
+                self.spill.release_register_w(&mut self.a, rd_h);
+            }
+            0b1100011 => {
+                // conditional branch
+                let funct3 = i_funct3(inst);
+                let imm = i_btype_imm(inst);
+
+                if funct3 == 0b010 || funct3 == 0b011 {
+                    self.emit_ud(vpc, inst);
+                } else {
+                    // check branch target
+                    let b_offset = imm as i32;
+                    let dst_pc = ((vpc as i64) + (b_offset as i64)) as u64;
+
+                    if dst_pc < self.base_vpc {
+                        self.emit_exception(vpc, error::ERROR_REASON_BRANCH_OOB);
+                        return;
                     }
-                    _ => self.emit_ud(vpc, inst)
+
+                    let dst_offset = (dst_pc - self.base_vpc) / 2;
+                    if dst_offset >= self.relative_br_labels.len() as u64 {
+                        self.emit_exception(vpc, error::ERROR_REASON_BRANCH_OOB);
+                        return;
+                    }
+
+                    let label = self.relative_br_labels[dst_offset as usize].clone();
+                    let (rs, rt, rs_h, rt_h) = self.spill.map_register_tuple_r_r(&mut self.a, i_rs(inst) as _, i_rt(inst) as _);
+                    self.emit_btype(vpc, inst, rs, rt, label);
+                    self.spill.release_register_r(&mut self.a, rs_h);
+                    self.spill.release_register_r(&mut self.a, rt_h);
                 }
             }
             _ => self.emit_ud(vpc, inst)
         }
     }
 
-    fn emit_ud(&mut self, vpc: u64, _inst: u32) {
+    fn emit_btype(&mut self, vpc: u64, inst: u32, rs: usize, rt: usize, label: DynamicLabel) {
+        match i_op(inst) {
+            0b1100011 => {
+                match i_funct3(inst) {
+                    0b000 => {
+                        // beq
+                        dynasm!(self.a
+                            ; .arch aarch64
+                            ; cmp X(rs as u32), X(rt as u32)
+                            ; b.eq =>label
+                        );
+                    }
+                    0b001 => {
+                        // bne
+                        dynasm!(self.a
+                            ; .arch aarch64
+                            ; cmp X(rs as u32), X(rt as u32)
+                            ; b.ne =>label
+                        );
+                    }
+                    0b100 => {
+                        // blt
+                        dynasm!(self.a
+                            ; .arch aarch64
+                            ; cmp X(rs as u32), X(rt as u32)
+                            ; b.lt =>label
+                        );
+                    }
+                    0b101 => {
+                        // bge
+                        dynasm!(self.a
+                            ; .arch aarch64
+                            ; cmp X(rs as u32), X(rt as u32)
+                            ; b.ge =>label
+                        );
+                    }
+                    0b110 => {
+                        // bltu
+                        dynasm!(self.a
+                            ; .arch aarch64
+                            ; cmp X(rs as u32), X(rt as u32)
+                            ; b.lo =>label
+                        );
+                    }
+                    0b111 => {
+                        // bgeu
+                        dynasm!(self.a
+                            ; .arch aarch64
+                            ; cmp X(rs as u32), X(rt as u32)
+                            ; b.hs =>label
+                        );
+                    }
+                    _ => unreachable!()
+                }
+
+            }
+            _ => unreachable!()
+        }
+    }
+
+    fn emit_itype(&mut self, vpc: u64, inst: u32, rd: usize, rs: usize, imm: u32) {
+        match i_op(inst) {
+            0b0010011 => {
+                // arith-i 32-bit
+                match i_funct3(inst) {
+                    0b000 => {
+                        // addi
+                        dynasm!(self.a
+                            ; .arch aarch64
+                            ; mov w30, imm as i32 as i64 as u64
+                            ; adds W(rd as u32), W(rs as u32), w30
+                        );
+                    }
+                    0b010 => {
+                        // slti
+                        dynasm!(self.a
+                            ; .arch aarch64
+                            ; mov w30, imm as i32 as i64 as u64
+                            ; cmp W(rs as u32), w30
+                            ; cset W(rd as u32), lt
+                        );
+                    }
+                    0b011 => {
+                        // sltu
+                        dynasm!(self.a
+                            ; .arch aarch64
+                            ; mov w30, imm as i32 as i64 as u64
+                            ; cmp W(rs as u32), w30
+                            ; cset W(rd as u32), lo
+                        );
+                    }
+                    0b100 => {
+                        // xori
+                        dynasm!(self.a
+                            ; .arch aarch64
+                            ; mov w30, imm as i32 as i64 as u64
+                            ; eor W(rd as u32), W(rs as u32), w30
+                            ; sxtw X(rd as u32), W(rd as u32)
+                        );
+                    }
+                    0b110 => {
+                        // ori
+                        dynasm!(self.a
+                            ; .arch aarch64
+                            ; mov w30, imm as i32 as i64 as u64
+                            ; orr W(rd as u32), W(rs as u32), w30
+                            ; sxtw X(rd as u32), W(rd as u32)
+                        );
+                    }
+                    0b111 => {
+                        // andi
+                        dynasm!(self.a
+                            ; .arch aarch64
+                            ; mov w30, imm as i32 as i64 as u64
+                            ; ands W(rd as u32), W(rs as u32), w30
+                        );
+                    }
+                    0b001 => {
+                        // slli
+                        dynasm!(self.a
+                            ; .arch aarch64
+                            ; lsl W(rd as u32), W(rs as u32), (imm & 0b11111)
+                            ; sxtw X(rd as u32), W(rd as u32)
+                        );
+                    }
+                    0b101 => {
+                        // srli/srai
+                        if imm & 0b0100000_00000 == 0 {
+                            // srli
+                            dynasm!(self.a
+                                ; .arch aarch64
+                                ; lsr W(rd as u32), W(rs as u32), (imm & 0b11111)
+                                ; sxtw X(rd as u32), W(rd as u32)
+                            );
+                        } else {
+                            // srai
+                            dynasm!(self.a
+                                ; .arch aarch64
+                                ; asr W(rd as u32), W(rs as u32), (imm & 0b11111)
+                                ; sxtw X(rd as u32), W(rd as u32)
+                            );
+                        }
+                    }
+                    _ => unreachable!()
+                }
+            }
+            _ => unreachable!()
+        }
+    }
+
+    fn emit_exception(&mut self, vpc: u64, reason: u16) {
         dynasm!(self.a
             ; .arch aarch64
 
-            ; mov x30, ((vpc & 0xffff) as u64)
-            ; movk x30, (((vpc >> 16) & 0xffff) as u32), lsl 16
-            ; movk x30, (((vpc >> 32) & 0xffff) as u32), lsl 32
-            ; movk x30, (((vpc >> 48) & 0xffff) as u32), lsl 48
-            ; str x30, [X(runtime_reg() as u32), Runtime::offset_error_vpc() as u32]
-
-            ; mov x30, (error::ERROR_REASON_UNDEFINED_INSTRUCTION as u64)
+            ; mov x30, reason as u64
             ; str x30, [X(runtime_reg() as u32), Runtime::offset_error_reason() as u32]
 
             ; ldr x30, [X(runtime_reg() as u32), Runtime::offset_exception_entry() as u32]
             ; blr x30
         );
+        let translation_offset = self.a.offset().0 as u32;
+        self.exception_translation_offset_to_v_offset.insert(translation_offset, (vpc - self.base_vpc) as u32);
+    }
+
+    fn emit_ud(&mut self, vpc: u64, _inst: u32) {
+        self.emit_exception(vpc, error::ERROR_REASON_UNDEFINED_INSTRUCTION);
     }
 }
 
@@ -107,7 +294,15 @@ impl SpillMachine {
         }
     }
 
+    fn prepare_dont_touch(dont_touch: &[usize]) -> Vec<usize> {
+        dont_touch.iter().filter_map(|x| match register_map_policy(*x) {
+            VirtualReg::Native(i) => Some(i),
+            VirtualReg::Memory(_) => None,
+        }).collect()
+    }
+
     fn map_register_r(&self, a: &mut Assembler, reg: usize, dont_touch: &[usize]) -> (usize, Option<SpillHandle>) {
+        let dont_touch = Self::prepare_dont_touch(dont_touch);
         match register_map_policy(reg) {
             VirtualReg::Native(i) => (i, None),
             VirtualReg::Memory(memory_index) => {
@@ -141,6 +336,7 @@ impl SpillMachine {
     }
 
     fn map_register_w(&self, a: &mut Assembler, reg: usize, dont_touch: &[usize]) -> (usize, Option<SpillHandle>) {
+        let dont_touch = Self::prepare_dont_touch(dont_touch);
         match register_map_policy(reg) {
             VirtualReg::Native(i) => (i, None),
             VirtualReg::Memory(memory_index) => {
@@ -194,7 +390,7 @@ impl SpillMachine {
         (rd_1, rs_1, rt_1, rd_h, rs_h, rt_h)
     }
 
-    fn map_register_tuple(&self, a: &mut Assembler, rd: usize, rs: usize) -> (usize, usize, Option<SpillHandle>, Option<SpillHandle>) {
+    fn map_register_tuple_w_r(&self, a: &mut Assembler, rd: usize, rs: usize) -> (usize, usize, Option<SpillHandle>, Option<SpillHandle>) {
         let (rs_1, mut rs_h) = self.map_register_r(a, rs, &[rd]);
 
         // Write release requires stronger writeback
@@ -206,6 +402,18 @@ impl SpillMachine {
         };
 
         (rd_1, rs_1, rd_h, rs_h)
+    }
+
+    fn map_register_tuple_r_r(&self, a: &mut Assembler, rs: usize, rt: usize) -> (usize, usize, Option<SpillHandle>, Option<SpillHandle>) {
+        let (rs_1, rs_h) = self.map_register_r(a, rs, &[rt]);
+
+        let (rt_1, rt_h) = if rs == rt {
+            (rs_1, None)
+        } else {
+            self.map_register_r(a, rt, &[rs])
+        };
+
+        (rs_1, rt_1, rs_h, rt_h)
     }
 
     fn release_register_r(&self, a: &mut Assembler, handle: Option<SpillHandle>) {
@@ -298,5 +506,29 @@ fn i_rd(i: u32) -> u32 {
 }
 
 fn i_itype_imm(i: u32) -> u32 {
-    i >> 20
+    ((i as i32) >> 20) as u32
+}
+
+fn i_btype_imm(inst: u32) -> u32 {
+    sext13b((((inst >> 8) & 0b1111) << 1)
+        | (((inst >> 7) & 0b1) << 11)
+        | (((inst >> 25) & 0b111111) << 5)
+        | (((inst >> 31) & 0b1) << 12)
+    )
+}
+
+fn sext12b(src: u32) -> u32 {
+    if src & (1 << 11) != 0 {
+        src | !0b1111_1111_1111u32
+    } else {
+        src
+    }
+}
+
+fn sext13b(src: u32) -> u32 {
+    if src & (1 << 12) != 0 {
+        src | !0b1_1111_1111_1111u32
+    } else {
+        src
+    }
 }
