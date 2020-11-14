@@ -9,7 +9,7 @@ use crate::error::ExecError;
 
 #[repr(C)]
 pub struct Runtime {
-    _error_vpc: u64,
+    pending_jalr_target: u64,
     error_reason: u64,
     exception_entry: unsafe extern "C" fn () -> !,
     memory_regs: [u64; 4],
@@ -19,12 +19,12 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    pub const fn offset_error_vpc() -> usize {
+    pub const fn offset_pending_jalr_target() -> usize {
         0
     }
 
     pub const fn offset_error_reason() -> usize {
-        Self::offset_error_vpc() + 8
+        Self::offset_pending_jalr_target() + 8
     }
 
     pub const fn offset_exception_entry() -> usize {
@@ -47,7 +47,7 @@ impl Runtime {
 impl Runtime {
     pub fn new() -> Self {
         Self {
-            _error_vpc: 0,
+            pending_jalr_target: 0,
             error_reason: 0,
             exception_entry: crate::entry_exit::_rvjit_guest_exception,
             memory_regs: [0; 4],

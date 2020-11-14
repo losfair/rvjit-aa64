@@ -5,7 +5,7 @@ use std::rc::Rc;
 use crate::runtime::Runtime;
 use crate::error;
 use byteorder::{LittleEndian, ReadBytesExt};
-use crate::translation::{VirtualReg, register_map_policy, Translation};
+use crate::translation::{VirtualReg, register_map_policy, Translation, JalrPatchPoint};
 use std::collections::BTreeMap;
 
 pub struct Codegen<'a> {
@@ -15,6 +15,7 @@ pub struct Codegen<'a> {
     raw: &'a [u8],
     v_offset_to_translation_offset: Box<[u32]>,
     exception_translation_offset_to_v_offset: BTreeMap<u32, u32>,
+    jalr_patch_points: BTreeMap<u32, JalrPatchPoint>,
     relative_br_labels: Box<[DynamicLabel]>,
 }
 
@@ -32,6 +33,7 @@ impl<'a> Codegen<'a> {
             raw,
             v_offset_to_translation_offset,
             exception_translation_offset_to_v_offset: BTreeMap::new(),
+            jalr_patch_points: BTreeMap::new(),
             relative_br_labels,
         }
     }
@@ -59,7 +61,26 @@ impl<'a> Codegen<'a> {
             backing: self.a,
             v_offset_to_translation_offset: self.v_offset_to_translation_offset,
             exception_translation_offset_to_v_offset: self.exception_translation_offset_to_v_offset,
+            jalr_patch_points: self.jalr_patch_points,
         }
+    }
+
+    fn prepare_rel_br(&mut self, vpc: u64, offset: i32) -> Option<DynamicLabel> {
+        let dst_pc = ((vpc as i64) + (offset as i64)) as u64;
+
+        if dst_pc < self.base_vpc {
+            self.emit_exception(vpc, error::ERROR_REASON_BRANCH_OOB);
+            return None;
+        }
+
+        let dst_offset = (dst_pc - self.base_vpc) / 2;
+        if dst_offset >= self.relative_br_labels.len() as u64 {
+            self.emit_exception(vpc, error::ERROR_REASON_BRANCH_OOB);
+            return None;
+        }
+
+        let label = self.relative_br_labels[dst_offset as usize].clone();
+        Some(label)
     }
 
     fn emit_once(&mut self, vpc: u64, inst: u32) {
@@ -72,6 +93,16 @@ impl<'a> Codegen<'a> {
                 self.emit_itype(vpc, inst, rd, rs, imm);
 
                 self.spill.release_register_r(&mut self.a, rs_h);
+                self.spill.release_register_w(&mut self.a, rd_h);
+            }
+            0b0110011 => {
+                // arith-r 64-bit
+                let (rd, rs, rt, rd_h, rs_h, rt_h) = self.spill.map_register_triple(&mut self.a, i_rd(inst) as _, i_rs(inst) as _, i_rt(inst) as _);
+
+                self.emit_rtype(vpc, inst, rd, rs, rt);
+
+                self.spill.release_register_r(&mut self.a, rs_h);
+                self.spill.release_register_r(&mut self.a, rt_h);
                 self.spill.release_register_w(&mut self.a, rd_h);
             }
             0b0011011 => {
@@ -98,22 +129,11 @@ impl<'a> Codegen<'a> {
                 if funct3 == 0b010 || funct3 == 0b011 {
                     self.emit_ud(vpc, inst);
                 } else {
-                    // check branch target
-                    let b_offset = imm as i32;
-                    let dst_pc = ((vpc as i64) + (b_offset as i64)) as u64;
+                    let label = match self.prepare_rel_br(vpc, imm as i32) {
+                        Some(x) => x,
+                        None => return
+                    };
 
-                    if dst_pc < self.base_vpc {
-                        self.emit_exception(vpc, error::ERROR_REASON_BRANCH_OOB);
-                        return;
-                    }
-
-                    let dst_offset = (dst_pc - self.base_vpc) / 2;
-                    if dst_offset >= self.relative_br_labels.len() as u64 {
-                        self.emit_exception(vpc, error::ERROR_REASON_BRANCH_OOB);
-                        return;
-                    }
-
-                    let label = self.relative_br_labels[dst_offset as usize].clone();
                     let (rs, rt, rs_h, rt_h) = self.spill.map_register_tuple_r_r(&mut self.a, i_rs(inst) as _, i_rt(inst) as _);
 
                     dynasm!(self.a
@@ -142,7 +162,195 @@ impl<'a> Codegen<'a> {
 
                 self.spill.release_register_w(&mut self.a, rd_h);
             }
+            0b0010111 => {
+                // auipc
+                let imm = i_utype_imm(inst);
+                let (rd, rd_h) = self.spill.map_register_w(&mut self.a, i_rd(inst) as _, &[]);
+
+                let value = vpc + ((imm << 12) as i32 as i64 as u64);
+                ld_imm64(&mut self.a, rd, value);
+
+                self.spill.release_register_w(&mut self.a, rd_h);
+            }
+            0b1101111 => {
+                // jal
+                let imm = i_jtype_imm(inst);
+                let label = match self.prepare_rel_br(vpc, imm as i32) {
+                    Some(x) => x,
+                    None => return
+                };
+                
+                let (rd, rd_h) = self.spill.map_register_w(&mut self.a, i_rd(inst) as _, &[]);
+                ld_imm64(&mut self.a, rd, vpc + 4);
+                self.spill.release_register_w(&mut self.a, rd_h);
+
+                dynasm!(self.a
+                    ; .arch aarch64
+                    ; b =>label
+                );
+            }
+            0b1100111 => {
+                // jalr
+                let imm = i_itype_imm(inst);
+                let (rd, rs, rd_h, rs_h) = self.spill.map_register_tuple_w_r(&mut self.a, i_rd(inst) as _, i_rs(inst) as _);
+
+                ld_simm16(&mut self.a, 30, imm);
+                dynasm!(self.a
+                    ; .arch aarch64
+                    ; add X(rd as u32), x30, X(rs as u32) // use rd as a buffer here
+                );
+
+                // Lower bound
+                let pp_lower = self.a.offset().0;
+                ld_imm64(&mut self.a, 30, std::u64::MAX); // PATCH
+                dynasm!(self.a
+                    ; .arch aarch64
+                    ; cmp X(rd as u32), x30
+                    ; b.lo >fallback
+                );
+
+                // Upper bound
+                let pp_upper = self.a.offset().0;
+                ld_imm64(&mut self.a, 30, 0); // PATCH
+                dynasm!(self.a
+                    ; .arch aarch64
+                    ; cmp X(rd as u32), x30
+                    ; b.hs >fallback
+                );
+
+                // V/real offset
+                let pp_offset = self.a.offset().0;
+                ld_imm64(&mut self.a, 30, 0); // PATCH
+
+                dynasm!(self.a
+                    ; .arch aarch64
+                    ; add x30, X(rd as u32), x30
+                    ; b >ok
+                );
+
+                dynasm!(self.a
+                    ; .arch aarch64
+                    ; fallback:
+                );
+
+                let pp = JalrPatchPoint {
+                    lower_bound_offset: pp_lower as u32,
+                    upper_bound_offset: pp_upper as u32,
+                    offset_value_offset: pp_offset as u32,
+                };
+                self.emit_exception(vpc, error::ERROR_REASON_JALR_MISS);
+                let asm_offset = self.a.offset().0;
+                self.jalr_patch_points.insert(asm_offset as u32, pp);
+
+                // x30 is not preserved so we need to load it
+                dynasm!(self.a
+                    ; .arch aarch64
+                    ; ldr x30, [x2, Runtime::offset_pending_jalr_target() as u32]
+                );
+
+                dynasm!(self.a
+                    ; .arch aarch64
+                    ; ok:
+                );
+                ld_imm64(&mut self.a, rd, vpc + 4);
+
+                dynasm!(self.a
+                    ; .arch aarch64
+                    ; br x30
+                );
+
+                self.spill.release_register_r(&mut self.a, rs_h);
+                self.spill.release_register_w(&mut self.a, rd_h);
+            }
             _ => self.emit_ud(vpc, inst)
+        }
+    }
+
+    fn emit_rtype(&mut self, vpc: u64, inst: u32, rd: usize, rs: usize, rt: usize) {
+        match i_op(inst) {
+            0b0110011 => {
+                match i_funct3(inst) {
+                    0b000 => {
+                        // add/sub
+                        if i_funct7(inst) & 0b0100000 == 0 {
+                            // add
+                            dynasm!(self.a
+                                ; .arch aarch64
+                                ; add X(rd as u32), X(rs as u32), X(rt as u32)
+                            );
+                        } else {
+                            // sub
+                            dynasm!(self.a
+                                ; .arch aarch64
+                                ; sub X(rd as u32), X(rs as u32), X(rt as u32)
+                            );
+                        }
+                    }
+                    0b001 => {
+                        // sll
+                        dynasm!(self.a
+                            ; .arch aarch64
+                            ; lsl X(rd as u32), X(rs as u32), X(rt as u32)
+                        );
+                    }
+                    0b010 => {
+                        // slt
+                        dynasm!(self.a
+                            ; .arch aarch64
+                            ; cmp X(rs as u32), X(rt as u32)
+                            ; cset X(rd as u32), lt
+                        );
+                    }
+                    0b011 => {
+                        // sltu
+                        dynasm!(self.a
+                            ; .arch aarch64
+                            ; cmp X(rs as u32), X(rt as u32)
+                            ; cset X(rd as u32), lo
+                        );
+                    }
+                    0b100 => {
+                        // xor
+                        dynasm!(self.a
+                            ; .arch aarch64
+                            ; eor X(rd as u32), X(rs as u32), X(rt as u32)
+                        );
+                    }
+                    0b101 => {
+                        // srl/sra
+                        // TODO: Check behavior when shifting by more than 32 bits
+                        if i_funct7(inst) & 0b0100000 == 0 {
+                            // srl
+                            dynasm!(self.a
+                                ; .arch aarch64
+                                ; lsr X(rd as u32), X(rs as u32), X(rt as u32)
+                            );
+                        } else {
+                            // sra
+                            dynasm!(self.a
+                                ; .arch aarch64
+                                ; asr X(rd as u32), X(rs as u32), X(rt as u32)
+                            );
+                        }
+                    }
+                    0b110 => {
+                        // or
+                        dynasm!(self.a
+                            ; .arch aarch64
+                            ; orr X(rd as u32), X(rs as u32), X(rt as u32)
+                        );
+                    }
+                    0b111 => {
+                        // and
+                        dynasm!(self.a
+                            ; .arch aarch64
+                            ; and X(rd as u32), X(rs as u32), X(rt as u32)
+                        );
+                    }
+                    _ => unreachable!()
+                }
+            }
+            _ => unreachable!()
         }
     }
 
@@ -521,6 +729,11 @@ impl SpillMachine {
 }
 
 fn ld_simm16(a: &mut Assembler, rd: usize, imm: u32) {
+    if rd == 31 {
+        // xzr
+        return;
+    }
+
     let imm = imm as i32;
     if imm < 0 {
         let imm = !(imm as u32);
@@ -535,6 +748,22 @@ fn ld_simm16(a: &mut Assembler, rd: usize, imm: u32) {
             ; movz X(rd as u32), imm
         );
     }
+}
+
+fn ld_imm64(a: &mut Assembler, rd: usize, imm: u64) {
+    if rd == 31 {
+        // xzr
+        return;
+    }
+
+    dynasm!(
+        a
+        ; .arch aarch64
+        ; movz X(rd as u32), (imm & 0xffff) as u32
+        ; movk X(rd as u32), ((imm >> 16) & 0xffff) as u32, lsl 16
+        ; movk X(rd as u32), ((imm >> 32) & 0xffff) as u32, lsl 32
+        ; movk X(rd as u32), ((imm >> 48) & 0xffff) as u32, lsl 48
+    )
 }
 
 fn runtime_reg() -> usize {
@@ -580,12 +809,24 @@ fn i_utype_imm(i: u32) -> u32 {
     i >> 12
 }
 
+fn i_jtype_imm(inst: u32) -> u32 {
+    sext21b((((inst >> 12) & 0b11111111) << 12)
+        | (((inst >> 20) & 0b1) << 11)
+        | (((inst >> 21) & 0b1111111111) << 1)
+        | (((inst >> 31) & 0b1) << 20)
+    )
+}
+
 fn i_btype_imm(inst: u32) -> u32 {
     sext13b((((inst >> 8) & 0b1111) << 1)
         | (((inst >> 7) & 0b1) << 11)
         | (((inst >> 25) & 0b111111) << 5)
         | (((inst >> 31) & 0b1) << 12)
     )
+}
+
+fn i_funct7(inst: u32) -> u32 {
+    inst >> 25
 }
 
 fn sext12b(src: u32) -> u32 {
@@ -599,6 +840,14 @@ fn sext12b(src: u32) -> u32 {
 fn sext13b(src: u32) -> u32 {
     if src & (1 << 12) != 0 {
         src | !0b1_1111_1111_1111u32
+    } else {
+        src
+    }
+}
+
+fn sext21b(src: u32) -> u32 {
+    if src & (1 << 20) != 0 {
+        src | !0b111_111_111_111_111_111_111u32
     } else {
         src
     }

@@ -11,3 +11,4 @@ pub enum ExecError {
 
 pub(crate) const ERROR_REASON_UNDEFINED_INSTRUCTION: u16 = 1;
 pub(crate) const ERROR_REASON_BRANCH_OOB: u16 = 2;
+pub(crate) const ERROR_REASON_JALR_MISS: u16 = 3;

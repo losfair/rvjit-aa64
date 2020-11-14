@@ -2,11 +2,18 @@ use dynasmrt::aarch64::Assembler;
 use crate::codegen::Codegen;
 use std::collections::BTreeMap;
 
-#[repr(C)]
 pub struct Translation {
     pub v_offset_to_translation_offset: Box<[u32]>,
     pub exception_translation_offset_to_v_offset: BTreeMap<u32, u32>,
+    pub jalr_patch_points: BTreeMap<u32, JalrPatchPoint>,
     pub backing: Assembler,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct JalrPatchPoint {
+    pub lower_bound_offset: u32,
+    pub upper_bound_offset: u32,
+    pub offset_value_offset: u32,
 }
 
 impl Translation {
@@ -29,6 +36,10 @@ impl Translation {
 
     pub fn translate_exception_offset(&self, exc_offset: u32) -> Option<u32> {
         self.exception_translation_offset_to_v_offset.get(&exc_offset).cloned()
+    }
+
+    pub fn get_jalr_patch_point(&self, exc_offset: u32) -> Option<JalrPatchPoint> {
+        self.jalr_patch_points.get(&exc_offset).cloned()
     }
 }
 
