@@ -1,10 +1,13 @@
 use thiserror::Error;
 
 #[derive(Error, Debug)]
-pub enum JitError {
+pub enum ExecError {
     #[error("unknown jit error")]
     Unknown,
+
+    #[error("attempting to execute code in an NX section")]
+    NoX,
 }
 
-pub const ERROR_REASON_UNDEFINED_INSTRUCTION: u16 = 1;
-pub const ERROR_REASON_BRANCH_OOB: u16 = 2;
+pub(crate) const ERROR_REASON_UNDEFINED_INSTRUCTION: u16 = 1;
+pub(crate) const ERROR_REASON_BRANCH_OOB: u16 = 2;

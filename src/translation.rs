@@ -31,3 +31,24 @@ impl Translation {
         self.exception_translation_offset_to_v_offset.get(&exc_offset).cloned()
     }
 }
+
+#[derive(Copy, Clone, Debug)]
+pub enum VirtualReg {
+    Native(usize),
+    Memory(usize),
+}
+
+pub fn register_map_policy(x: usize) -> VirtualReg {
+    use VirtualReg::*;
+
+    // Reserve x2 and x30
+    match x {
+        0 => Native(31), // zero
+        1 => Native(0),
+        2 => Native(1),
+        3 => Memory(0),
+        4 => Memory(1),
+        x if x >= 5 && x <= 31 => Native(x - 2),
+        _ => unreachable!(),
+    }
+}
