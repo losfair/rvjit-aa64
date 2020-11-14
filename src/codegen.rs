@@ -193,20 +193,16 @@ impl<'a> Codegen<'a> {
                 // jalr
                 let imm = i_itype_imm(inst);
                 let (rd, rs, rd_h, rs_h) = self.spill.map_register_tuple_w_r(&mut self.a, i_rd(inst) as _, i_rs(inst) as _);
+                let (t0, t0_h) = self.spill.mk_temp(&mut self.a, &[i_rd(inst) as _, i_rs(inst) as _]);
+
+                // XXX: Don't use rd as buffer! In case rd == xzr.
+                let (t1, t1_h) = self.spill.mk_temp(&mut self.a, &[i_rd(inst) as _, i_rs(inst) as _]);
 
                 ld_simm16(&mut self.a, 30, imm);
                 dynasm!(self.a
                     ; .arch aarch64
-                    ; add X(rd as u32), x30, X(rs as u32) // use rd as a buffer here
-                );
-
-                // Lower bound
-                let pp_lower = self.a.offset().0;
-                ld_imm64(&mut self.a, 30, std::u64::MAX); // PATCH
-                dynasm!(self.a
-                    ; .arch aarch64
-                    ; cmp X(rd as u32), x30
-                    ; b.lo >fallback
+                    ; add X(t1 as u32), x30, X(rs as u32) // use rd as a buffer here
+                    ; jalr_check:
                 );
 
                 // Upper bound
@@ -214,38 +210,62 @@ impl<'a> Codegen<'a> {
                 ld_imm64(&mut self.a, 30, 0); // PATCH
                 dynasm!(self.a
                     ; .arch aarch64
-                    ; cmp X(rd as u32), x30
+                    ; cmp X(t1 as u32), x30
                     ; b.hs >fallback
                 );
 
-                // V/real offset
-                let pp_offset = self.a.offset().0;
-                ld_imm64(&mut self.a, 30, 0); // PATCH
-
+                // Lower bound
+                let pp_lower = self.a.offset().0;
+                ld_imm64(&mut self.a, 30, std::u64::MAX); // PATCH
                 dynasm!(self.a
                     ; .arch aarch64
-                    ; add x30, X(rd as u32), x30
+                    ; cmp X(t1 as u32), x30
+                    ; b.lo >fallback
+                    ; sub X(t1 as u32), X(t1 as u32), x30
+                );
+
+                // V/real offset table
+                let pp_v2real_table = self.a.offset().0;
+                ld_imm64(&mut self.a, 30, 0); // PATCH
+
+                // Load real offset from v2real table
+                dynasm!(self.a
+                    ; .arch aarch64
+                    ; lsr X(t1 as u32), X(t1 as u32), 1
+                    ; lsl X(t1 as u32), X(t1 as u32), 2
+                    ; add x30, X(t1 as u32), x30
+                    ; ldr W(t0 as u32), [x30]
+                );
+
+                // Machine code base
+                let pp_machine_base = self.a.offset().0;
+                ld_imm64(&mut self.a, 30, 0); // PATCH
+                dynasm!(self.a
+                    ; .arch aarch64
+                    ; add x30, X(t0 as u32), x30 // compute actual address by base + offset
                     ; b >ok
                 );
 
                 dynasm!(self.a
                     ; .arch aarch64
                     ; fallback:
+                    ; str X(t1 as u32), [X(runtime_reg() as u32), Runtime::offset_error_data() as u32]
                 );
 
                 let pp = JalrPatchPoint {
                     lower_bound_offset: pp_lower as u32,
                     upper_bound_offset: pp_upper as u32,
-                    offset_value_offset: pp_offset as u32,
+                    v2real_table_offset: pp_v2real_table as u32,
+                    machine_base_offset: pp_machine_base as u32,
                 };
                 self.emit_exception(vpc, error::ERROR_REASON_JALR_MISS);
                 let asm_offset = self.a.offset().0;
                 self.jalr_patch_points.insert(asm_offset as u32, pp);
 
-                // x30 is not preserved so we need to load it
+                // Retry.
                 dynasm!(self.a
                     ; .arch aarch64
-                    ; ldr x30, [x2, Runtime::offset_pending_jalr_target() as u32]
+                    ; b <jalr_check
                 );
 
                 dynasm!(self.a
@@ -254,13 +274,15 @@ impl<'a> Codegen<'a> {
                 );
                 ld_imm64(&mut self.a, rd, vpc + 4);
 
+                self.spill.release_temp(&mut self.a, t0_h);
+                self.spill.release_temp(&mut self.a, t1_h);
+                self.spill.release_register_r(&mut self.a, rs_h);
+                self.spill.release_register_w(&mut self.a, rd_h);
+
                 dynasm!(self.a
                     ; .arch aarch64
                     ; br x30
                 );
-
-                self.spill.release_register_r(&mut self.a, rs_h);
-                self.spill.release_register_w(&mut self.a, rd_h);
             }
             _ => self.emit_ud(vpc, inst)
         }
@@ -580,6 +602,47 @@ impl SpillMachine {
         }).collect()
     }
 
+    fn mk_temp(&self, a: &mut Assembler, dont_touch: &[usize]) -> (usize, TempSpillHandle) {
+        let dont_touch = Self::prepare_dont_touch(dont_touch);
+
+        for i in 0..31 {
+            if self.spilled_regs.get().get_bit(i) {
+                continue;
+            }
+            if dont_touch.contains(&i) {
+                continue;
+            }
+
+            self.spilled_regs.update(|mut x| *x.set_bit(i, true));
+
+            let offset_spill_out = Runtime::offset_spill() + i * 8;
+
+            dynasm!(a
+                ; .arch aarch64
+                ; str X(i as u32), [X(runtime_reg() as u32), offset_spill_out as u32]
+            );
+
+            return (i, TempSpillHandle {
+                spill_reg_index: i,
+            });
+        }
+
+        panic!("SpillMachine::mk_temp: no register available");
+    }
+
+    fn release_temp(&self, a: &mut Assembler, handle: TempSpillHandle) {
+        assert!(self.spilled_regs.get().get_bit(handle.spill_reg_index));
+        self.spilled_regs.update(|mut x| *x.set_bit(handle.spill_reg_index, false));
+
+        let offset_spill_out = Runtime::offset_spill() + handle.spill_reg_index * 8;
+
+        dynasm!(a
+            ; .arch aarch64
+            ; ldr X(handle.spill_reg_index as u32), [X(runtime_reg() as u32), offset_spill_out as u32]
+        );
+        std::mem::forget(handle);
+    }
+
     fn map_register_r(&self, a: &mut Assembler, reg: usize, dont_touch: &[usize]) -> (usize, Option<SpillHandle>) {
         let dont_touch = Self::prepare_dont_touch(dont_touch);
         match register_map_policy(reg) {
@@ -728,7 +791,7 @@ impl SpillMachine {
     }
 }
 
-fn ld_simm16(a: &mut Assembler, rd: usize, imm: u32) {
+pub(crate) fn ld_simm16<A: DynasmApi>(a: &mut A, rd: usize, imm: u32) {
     if rd == 31 {
         // xzr
         return;
@@ -750,7 +813,7 @@ fn ld_simm16(a: &mut Assembler, rd: usize, imm: u32) {
     }
 }
 
-fn ld_imm64(a: &mut Assembler, rd: usize, imm: u64) {
+pub(crate) fn ld_imm64<A: DynasmApi>(a: &mut A, rd: usize, imm: u64) {
     if rd == 31 {
         // xzr
         return;
@@ -766,8 +829,33 @@ fn ld_imm64(a: &mut Assembler, rd: usize, imm: u64) {
     )
 }
 
+pub(crate) fn ld_simm32<A: DynasmApi>(a: &mut A, rd: usize, imm: u32) {
+    if rd == 31 {
+        // xzr
+        return;
+    }
+
+    dynasm!(
+        a
+        ; .arch aarch64
+        ; movz X(rd as u32), (imm & 0xffff) as u32
+        ; movk X(rd as u32), ((imm >> 16) & 0xffff) as u32, lsl 16
+        ; sxtw X(rd as u32), W(rd as u32)
+    )
+}
+
 fn runtime_reg() -> usize {
     2
+}
+
+struct TempSpillHandle {
+    spill_reg_index: usize,
+}
+
+impl Drop for TempSpillHandle {
+    fn drop(&mut self) {
+        panic!("TempSpillHandle dropped without proper release");
+    }
 }
 
 struct SpillHandle {

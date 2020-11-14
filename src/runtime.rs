@@ -5,26 +5,26 @@ use std::sync::Arc;
 use crate::translation::{Translation, VirtualReg, register_map_policy};
 use dynasmrt::AssemblyOffset;
 use std::sync::Mutex;
-use crate::error::ExecError;
+use crate::error::{self, ExecError};
 
 #[repr(C)]
 pub struct Runtime {
-    pending_jalr_target: u64,
+    error_data: u64,
     error_reason: u64,
     exception_entry: unsafe extern "C" fn () -> !,
     memory_regs: [u64; 4],
-    spill: [u64; 32],
+    spill: [u64; 32], // FIXME: only the first 256 bytes of Runtime are directly addressable so latter spill locations may not be accessible
     guest_save: [u64; 32],
     sections: Box<BTreeMap<u64, Arc<Section>>>,
 }
 
 impl Runtime {
-    pub const fn offset_pending_jalr_target() -> usize {
+    pub const fn offset_error_data() -> usize {
         0
     }
 
     pub const fn offset_error_reason() -> usize {
-        Self::offset_pending_jalr_target() + 8
+        Self::offset_error_data() + 8
     }
 
     pub const fn offset_exception_entry() -> usize {
@@ -47,7 +47,7 @@ impl Runtime {
 impl Runtime {
     pub fn new() -> Self {
         Self {
-            pending_jalr_target: 0,
+            error_data: 0,
             error_reason: 0,
             exception_entry: crate::entry_exit::_rvjit_guest_exception,
             memory_regs: [0; 4],
@@ -57,13 +57,12 @@ impl Runtime {
         }
     }
 
-    pub fn run(&mut self, vpc: u64) -> Result<u64, ExecError> {
+    pub fn run(&mut self, vpc: u64) -> Result<(), ExecError> {
         let section = self.lookup_section(vpc).expect("Runtime::run: section not found");
         if !section.flags.contains(SectionFlags::X) {
             panic!("Runtime::run: bad section permissions");
         }
-        let exit_vpc = section.run(self, vpc)?;
-        Ok(exit_vpc)
+        section.run(self, vpc)
     }
 
     pub fn error_reason(&self) -> u16 {
@@ -167,30 +166,76 @@ impl Section {
         }
     }
 
-    fn run(&self, rt: &mut Runtime, vpc: u64) -> Result<u64, ExecError> {
+    fn ensure_translation(&self) -> Result<(), ExecError> {
         if !self.flags.contains(SectionFlags::X) {
             return Err(ExecError::NoX);
         }
-    
-        let v_offset = vpc.checked_sub(self.base_v).expect("Section::run: invalid address") as u32;
+
         let mut translation = self.translation.lock().unwrap();
         if translation.is_none() {
             *translation = Some(Translation::new(self.base_v, &self.data));
         }
-        let translation = translation.as_ref().unwrap();
+
+        Ok(())
+    }
+
+    fn run(&self, rt: &mut Runtime, vpc: u64) -> Result<(), ExecError> {
+        self.ensure_translation()?;
+    
+        let v_offset = vpc.checked_sub(self.base_v).expect("Section::run: invalid address") as u32;
+        let mut translation = self.translation.lock().unwrap();
+        let translation = translation.as_mut().unwrap();
         match translation.translate_v_offset(v_offset) {
             Some(x) => {
-                let executor = translation.backing.reader();
-                let executor = executor.lock();
-                let ptr = executor.ptr(AssemblyOffset(0));
-                unsafe {
-                    crate::entry_exit::_rvjit_enter_guest(rt, ptr as u64);
-                }
+                let mut real_offset = AssemblyOffset(x as _);
+                loop {
+                    let ptr;
+                    let base;
 
-                let raw_offset = rt.guest_save[30] - (ptr as u64);
-                let exit_v_offset = translation.translate_exception_offset(raw_offset as u32).expect("Section::run: cannot find exception offset");
-                let exit_vpc = self.base_v + (exit_v_offset as u64);
-                Ok(exit_vpc)
+                    {
+                        let executor = translation.backing.reader();
+                        let executor = executor.lock();
+                        base = executor.ptr(AssemblyOffset(0)) as u64;
+                        ptr = executor.ptr(real_offset) as u64;
+                        unsafe {
+                            crate::entry_exit::_rvjit_enter_guest(rt, ptr);
+                        }
+                    }
+
+                    let exc_offset = (rt.guest_save[30] - base) as u32;
+                    let exit_v_offset = translation.translate_exception_offset(exc_offset).expect("Section::run: cannot find exception offset");
+                    let exit_vpc = self.base_v + (exit_v_offset as u64);
+
+                    println!("EXIT at vpc 0x{:016x}", exit_vpc);
+                    rt.debug_print_registers();
+
+                    match rt.error_reason as u16 {
+                        error::ERROR_REASON_JALR_MISS => {
+                            let jalr_target = rt.error_data;
+                            println!("JALR miss. target = 0x{:016x}", jalr_target);
+
+                            let target_section = match rt.lookup_section(jalr_target) {
+                                Some(x) => x,
+                                None => return Err(ExecError::BadJalr),
+                            };
+
+                            if target_section.base_v == self.base_v {
+                                // TODO: Better way of detecting equivalence?
+                                translation.patch_jalr(exc_offset, self.base_v, None);
+                            } else {
+                                target_section.ensure_translation()?;
+                                let target_translation = target_section.translation.lock().unwrap();
+                                let target_translation = target_translation.as_ref().unwrap();
+                                translation.patch_jalr(exc_offset, target_section.base_v, Some(target_translation));
+                            }
+
+                            real_offset = AssemblyOffset(exc_offset as _);
+                        }
+                        _ => {
+                            panic!("Unknown error reason: {}", rt.error_reason);
+                        }
+                    }
+                }
             }
             None => {
                 panic!("Section::run: invalid v-offset");

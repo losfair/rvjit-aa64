@@ -1,6 +1,8 @@
-use dynasmrt::aarch64::Assembler;
-use crate::codegen::Codegen;
+use dynasmrt::{AssemblyOffset, aarch64::Assembler};
+use crate::codegen::{self, Codegen};
 use std::collections::BTreeMap;
+use crate::error::ExecError;
+use crate::runtime::Section;
 
 pub struct Translation {
     pub v_offset_to_translation_offset: Box<[u32]>,
@@ -13,7 +15,8 @@ pub struct Translation {
 pub struct JalrPatchPoint {
     pub lower_bound_offset: u32,
     pub upper_bound_offset: u32,
-    pub offset_value_offset: u32,
+    pub v2real_table_offset: u32,
+    pub machine_base_offset: u32,
 }
 
 impl Translation {
@@ -40,6 +43,38 @@ impl Translation {
 
     pub fn get_jalr_patch_point(&self, exc_offset: u32) -> Option<JalrPatchPoint> {
         self.jalr_patch_points.get(&exc_offset).cloned()
+    }
+
+    pub fn patch_jalr(&mut self, exc_offset: u32, target_base_v: u64, target: Option<&Translation>) {
+        let pp = match self.get_jalr_patch_point(exc_offset) {
+            Some(x) => x,
+            None => panic!("Translation::patch_jalr: cannot find patch point"),
+        };
+
+        let target = if let Some(x) = target {
+            x
+        } else {
+            &*self
+        };
+        
+        let lower_bound = target_base_v;
+        let upper_bound = target_base_v + ((target.v_offset_to_translation_offset.len() * 2) as u64);
+        let v2real_table = target.v_offset_to_translation_offset.as_ptr() as u64;
+        let machine_base = target.backing.reader().lock().ptr(AssemblyOffset(0)) as u64;
+
+        self.backing.alter(|m| {
+            m.goto(AssemblyOffset(pp.lower_bound_offset as _));
+            codegen::ld_imm64(m, 30, lower_bound);
+
+            m.goto(AssemblyOffset(pp.upper_bound_offset as _));
+            codegen::ld_imm64(m, 30, upper_bound);
+
+            m.goto(AssemblyOffset(pp.v2real_table_offset as _));
+            codegen::ld_imm64(m, 30, v2real_table);
+
+            m.goto(AssemblyOffset(pp.machine_base_offset as _));
+            codegen::ld_imm64(m, 30, machine_base);
+        }).unwrap();
     }
 }
 

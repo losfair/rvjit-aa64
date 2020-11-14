@@ -7,6 +7,9 @@ pub enum ExecError {
 
     #[error("attempting to execute code in an NX section")]
     NoX,
+
+    #[error("bad indirect jump target")]
+    BadJalr,
 }
 
 pub(crate) const ERROR_REASON_UNDEFINED_INSTRUCTION: u16 = 1;
