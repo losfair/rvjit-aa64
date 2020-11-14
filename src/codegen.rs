@@ -121,6 +121,22 @@ impl<'a> Codegen<'a> {
                 self.spill.release_register_r(&mut self.a, rs_h);
                 self.spill.release_register_w(&mut self.a, rd_h);
             }
+            0b0111011 => {
+                // arith-r 32-bit
+                let funct3 = i_funct3(inst);
+                if funct3 != 0b000 && funct3 != 0b001 && funct3 != 0b101 {
+                    self.emit_ud(vpc, inst);
+                    return;
+                }
+
+                let (rd, rs, rt, rd_h, rs_h, rt_h) = self.spill.map_register_triple(&mut self.a, i_rd(inst) as _, i_rs(inst) as _, i_rt(inst) as _);
+
+                self.emit_rtype(vpc, inst, rd, rs, rt);
+
+                self.spill.release_register_r(&mut self.a, rs_h);
+                self.spill.release_register_r(&mut self.a, rt_h);
+                self.spill.release_register_w(&mut self.a, rd_h);
+            }
             0b1100011 => {
                 // conditional branch
                 let funct3 = i_funct3(inst);
@@ -368,6 +384,54 @@ impl<'a> Codegen<'a> {
                             ; .arch aarch64
                             ; and X(rd as u32), X(rs as u32), X(rt as u32)
                         );
+                    }
+                    _ => unreachable!()
+                }
+            }
+            0b0111011 => {
+                match i_funct3(inst) {
+                    0b000 => {
+                        // addw/subw
+                        if i_funct7(inst) & 0b0100000 == 0 {
+                            // addw
+                            dynasm!(self.a
+                                ; .arch aarch64
+                                ; adds W(rd as u32), W(rs as u32), W(rt as u32)
+                            );
+                        } else {
+                            // subw
+                            dynasm!(self.a
+                                ; .arch aarch64
+                                ; subs W(rd as u32), W(rs as u32), W(rt as u32)
+                            );
+                        }
+                    }
+                    0b001 => {
+                        // sll
+                        dynasm!(self.a
+                            ; .arch aarch64
+                            ; lsl W(rd as u32), W(rs as u32), W(rt as u32)
+                            ; sxtw X(rd as u32), W(rd as u32)
+                        );
+                    }
+                    0b101 => {
+                        // srl/sra
+                        // TODO: Check behavior when shifting by more than 32 bits
+                        if i_funct7(inst) & 0b0100000 == 0 {
+                            // srl
+                            dynasm!(self.a
+                                ; .arch aarch64
+                                ; lsr W(rd as u32), W(rs as u32), W(rt as u32)
+                                ; sxtw X(rd as u32), W(rd as u32)
+                            );
+                        } else {
+                            // sra
+                            dynasm!(self.a
+                                ; .arch aarch64
+                                ; asr W(rd as u32), W(rs as u32), W(rt as u32)
+                                ; sxtw X(rd as u32), W(rd as u32)
+                            );
+                        }
                     }
                     _ => unreachable!()
                 }
