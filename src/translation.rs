@@ -40,6 +40,31 @@ pub struct LoadStorePatchPoint {
     pub is_store: bool,
 }
 
+trait PatchPoint {
+    fn offsets(&self) -> Vec<u32>;
+    fn max_patch_size(&self) -> u32;
+}
+
+impl PatchPoint for JalrPatchPoint {
+    fn offsets(&self) -> Vec<u32> {
+        vec![self.lower_bound_offset, self.upper_bound_offset, self.v2real_table_offset, self.machine_base_offset]
+    }
+
+    fn max_patch_size(&self) -> u32 {
+        64
+    }
+}
+
+impl PatchPoint for LoadStorePatchPoint {
+    fn offsets(&self) -> Vec<u32> {
+        vec![self.lower_bound_offset, self.upper_bound_offset, self.reloff_offset]
+    }
+
+    fn max_patch_size(&self) -> u32 {
+        64
+    }
+}
+
 impl Translation {
     pub fn new(base_v: u64, raw: &[u8]) -> Self {
         let mut cg = Codegen::new(base_v, raw);
@@ -90,6 +115,8 @@ impl Translation {
             m.goto(AssemblyOffset(pp.reloff_offset as _));
             codegen::ld_imm64(m, 30, reloff);
         }).unwrap();
+
+        self.flush_patch_point(&pp);
     }
 
     pub fn try_invalidate_load_store(&mut self, exc_offset: u32) {
@@ -108,6 +135,8 @@ impl Translation {
             m.goto(AssemblyOffset(pp.reloff_offset as _));
             codegen::ld_imm64(m, 30, std::u64::MAX);
         }).unwrap();
+
+        self.flush_patch_point(&pp);
     }
 
     pub fn patch_jalr(&mut self, exc_offset: u32, target_base_v: u64, target: Option<&Translation>) {
@@ -140,6 +169,25 @@ impl Translation {
             m.goto(AssemblyOffset(pp.machine_base_offset as _));
             codegen::ld_imm64(m, 30, machine_base);
         }).unwrap();
+
+        self.flush_patch_point(&pp);
+    }
+
+    fn flush_patch_point<T: PatchPoint>(&self, pp: &T) {
+        let min_offset = pp.offsets().iter().cloned().min().unwrap();
+        let max_offset = pp.offsets().iter().cloned().max().unwrap();
+
+        let executor = self.backing.reader();
+        let executor = executor.lock();
+
+        let flush_start = executor.ptr(AssemblyOffset(min_offset as _)) as usize;
+        let max_size = executor.len() as usize - min_offset as usize;
+        let flush_size = ((max_offset - min_offset) as usize) + pp.max_patch_size() as usize;
+        let flush_size = flush_size.min(max_size);
+
+        unsafe {
+            flush_cache_range(flush_start, flush_size);
+        }
     }
 }
 
@@ -164,5 +212,13 @@ pub fn register_map_policy(x: usize) -> VirtualReg {
         30 => Memory(2),
         31 => Memory(3),
         _ => unreachable!(),
+    }
+}
+
+unsafe fn flush_cache_range(start: usize, len: usize) {
+    // FIXME: We are assuming cacheline size == 64 here.
+    for i in (0..len).step_by(64) {
+        let addr = start + i;
+        llvm_asm!("ic ivau, $0" :: "r"(addr) :: "volatile");
     }
 }

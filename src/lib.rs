@@ -1,4 +1,4 @@
-#![feature(cell_update, global_asm)]
+#![feature(cell_update, global_asm, llvm_asm)]
 
 pub mod codegen;
 pub mod runtime;
