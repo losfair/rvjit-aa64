@@ -50,9 +50,12 @@ pub fn load(rt: &mut Runtime, image: &[u8]) -> Result<()> {
 }
 
 fn convert_flags(f: Flags) -> Result<SectionFlags> {
+    // FIXME: Disabling this check is UNSAFE.
+    /*
     if f.is_write() && f.is_execute() {
         return Err(LoadError::WXViolation.into());
     }
+    */
 
     let mut out = SectionFlags::empty();
     if f.is_read() {
