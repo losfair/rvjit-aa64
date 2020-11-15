@@ -5,7 +5,7 @@ use std::rc::Rc;
 use crate::runtime::Runtime;
 use crate::error;
 use byteorder::{LittleEndian, ReadBytesExt};
-use crate::translation::{ExceptionPoint, VirtualReg, register_map_policy, Translation, JalrPatchPoint};
+use crate::translation::{ExceptionPoint, VirtualReg, register_map_policy, Translation, JalrPatchPoint, LoadStorePatchPoint};
 use std::collections::BTreeMap;
 
 pub struct Codegen<'a> {
@@ -16,6 +16,7 @@ pub struct Codegen<'a> {
     v_offset_to_translation_offset: Box<[u32]>,
     exception_points: BTreeMap<u32, ExceptionPoint>,
     jalr_patch_points: BTreeMap<u32, JalrPatchPoint>,
+    load_store_patch_points: BTreeMap<u32, LoadStorePatchPoint>,
     relative_br_labels: Box<[DynamicLabel]>,
 }
 
@@ -34,6 +35,7 @@ impl<'a> Codegen<'a> {
             v_offset_to_translation_offset,
             exception_points: BTreeMap::new(),
             jalr_patch_points: BTreeMap::new(),
+            load_store_patch_points: BTreeMap::new(),
             relative_br_labels,
         }
     }
@@ -62,6 +64,7 @@ impl<'a> Codegen<'a> {
             v_offset_to_translation_offset: self.v_offset_to_translation_offset,
             exception_points: self.exception_points,
             jalr_patch_points: self.jalr_patch_points,
+            load_store_patch_points: self.load_store_patch_points,
         }
     }
 
@@ -210,8 +213,150 @@ impl<'a> Codegen<'a> {
                 let imm = i_itype_imm(inst);
                 self.emit_jalr(vpc, i_rd(inst) as _, i_rs(inst) as _, imm)
             }
+            0b0000011 => {
+                // load
+                let raw_rd = i_rd(inst) as _;
+                let raw_rs = i_rs(inst) as _;
+                let imm = i_itype_imm(inst);
+
+                match i_funct3(inst) {
+                    0b000 => {
+                        // lb
+                        self.emit_load(vpc, raw_rd, raw_rs, imm, 1, |this, rd, rs| {
+                            dynasm!(this.a
+                                ; .arch aarch64
+                                ; ldrsb X(rd), [X(rs)]
+                            );
+                        });
+                    }
+                    0b001 => {
+                        // lh
+                        self.emit_load(vpc, raw_rd, raw_rs, imm, 2, |this, rd, rs| {
+                            dynasm!(this.a
+                                ; .arch aarch64
+                                ; ldrsh X(rd), [X(rs)]
+                            );
+                        });
+                    }
+                    0b010 => {
+                        // lw
+                        self.emit_load(vpc, raw_rd, raw_rs, imm, 4, |this, rd, rs| {
+                            dynasm!(this.a
+                                ; .arch aarch64
+                                ; ldrsw X(rd), [X(rs)]
+                            );
+                        });
+                    }
+                    0b011 => {
+                        // ld
+                        self.emit_load(vpc, raw_rd, raw_rs, imm, 8, |this, rd, rs| {
+                            dynasm!(this.a
+                                ; .arch aarch64
+                                ; ldr X(rd), [X(rs)]
+                            );
+                        });
+                    }
+                    0b100 => {
+                        // lbu
+                        self.emit_load(vpc, raw_rd, raw_rs, imm, 1, |this, rd, rs| {
+                            dynasm!(this.a
+                                ; .arch aarch64
+                                ; ldrb W(rd), [X(rs)]
+                            );
+                        });
+                    }
+                    0b101 => {
+                        // lhu
+                        self.emit_load(vpc, raw_rd, raw_rs, imm, 2, |this, rd, rs| {
+                            dynasm!(this.a
+                                ; .arch aarch64
+                                ; ldrh W(rd), [X(rs)]
+                            );
+                        });
+                    }
+                    0b110 => {
+                        // lwu
+                        self.emit_load(vpc, raw_rd, raw_rs, imm, 4, |this, rd, rs| {
+                            dynasm!(this.a
+                                ; .arch aarch64
+                                ; ldr W(rd), [X(rs)]
+                            );
+                        });
+                    }
+                    _ => self.emit_ud(vpc, inst)
+                }
+            }
             _ => self.emit_ud(vpc, inst)
         }
+    }
+
+    fn emit_load<F: FnOnce(&mut Self, u32, u32)>(&mut self, vpc: u64, raw_rd: u32, raw_rs: u32, imm: u32, access_size: u32, emit_inner: F) {
+        let (rd, rs, rd_h, rs_h) = self.spill.map_register_tuple_w_r(&mut self.a, raw_rd as _, raw_rs as _);
+        let (t0, t0_h) = self.spill.mk_temp(&mut self.a, &[raw_rd as _, raw_rs as _]);
+
+        // Compute effective address
+        ld_simm16(&mut self.a, t0 as _, imm);
+        dynasm!(self.a
+            ; .arch aarch64
+            ; add X(t0 as u32), X(t0 as u32), X(rs as u32)
+        );
+
+        // Upper bound
+        // XXX: Substract load size when patching
+        let pp_upper = self.a.offset().0;
+        ld_imm64(&mut self.a, 30, 0); // PATCH
+        dynasm!(self.a
+            ; .arch aarch64
+            ; cmp X(t0 as u32), x30
+            ; b.hs >fallback
+        );
+
+        // Lower bound
+        let pp_lower = self.a.offset().0;
+        ld_imm64(&mut self.a, 30, std::u64::MAX); // PATCH
+        dynasm!(self.a
+            ; .arch aarch64
+            ; cmp X(t0 as u32), x30
+            ; b.lo >fallback
+        );
+
+        // v_addr + this_offset = real_addr
+        let pp_reloff = self.a.offset().0;
+        ld_imm64(&mut self.a, 30, std::u64::MAX); // PATCH
+        dynasm!(self.a
+            ; .arch aarch64
+            ; add X(t0 as u32), X(t0 as u32), x30
+        );
+
+        emit_inner(self, rd as _, t0 as _);
+
+        dynasm!(self.a
+            ; .arch aarch64
+            ; b >ok
+            ; fallback:
+        );
+
+        self.emit_exception(vpc, error::ERROR_REASON_LOAD_STORE_MISS);
+        let pp = LoadStorePatchPoint {
+            lower_bound_offset: pp_lower as _,
+            upper_bound_offset: pp_upper as _,
+            reloff_offset: pp_reloff as _,
+            rs: raw_rs as u32,
+            rs_offset: imm as i32,
+            access_size: access_size,
+            is_store: false,
+        };
+        let asm_offset = self.a.offset().0;
+        self.load_store_patch_points.insert(asm_offset as u32, pp);
+
+        dynasm!(self.a
+            ; .arch aarch64
+            ; ok:
+        );
+
+        self.spill.release_temp(&mut self.a, t0_h);
+        self.spill.release_register_r(&mut self.a, rs_h);
+        self.spill.release_register_w(&mut self.a, rd_h);
     }
 
     fn emit_jalr(&mut self, vpc: u64, raw_rd: u32, raw_rs: u32, imm: u32) {

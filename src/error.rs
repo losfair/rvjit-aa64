@@ -17,10 +17,17 @@ pub enum ExecError {
     #[error("bad instruction pointer")]
     BadPC,
 
-    #[error("global jump")]
-    GlobalJump,
+    #[error("bad load/store address")]
+    BadLoadStoreAddress,
+
+    #[error("bad load/store flags")]
+    BadLoadStoreFlags,
+
+    #[error("retry")]
+    Retry,
 }
 
 pub(crate) const ERROR_REASON_UNDEFINED_INSTRUCTION: u16 = 1;
 pub(crate) const ERROR_REASON_BRANCH_OOB: u16 = 2;
 pub(crate) const ERROR_REASON_JALR_MISS: u16 = 3;
+pub(crate) const ERROR_REASON_LOAD_STORE_MISS: u16 = 4;

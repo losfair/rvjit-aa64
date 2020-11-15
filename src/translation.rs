@@ -8,6 +8,7 @@ pub struct Translation {
     pub v_offset_to_translation_offset: Box<[u32]>,
     pub exception_points: BTreeMap<u32, ExceptionPoint>,
     pub jalr_patch_points: BTreeMap<u32, JalrPatchPoint>,
+    pub load_store_patch_points: BTreeMap<u32, LoadStorePatchPoint>,
     pub backing: Assembler,
 }
 
@@ -26,6 +27,17 @@ pub struct JalrPatchPoint {
     pub rd: u32,
     pub rs: u32,
     pub rs_offset: i32,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct LoadStorePatchPoint {
+    pub lower_bound_offset: u32,
+    pub upper_bound_offset: u32,
+    pub reloff_offset: u32,
+    pub rs: u32,
+    pub rs_offset: i32,
+    pub access_size: u32,
+    pub is_store: bool,
 }
 
 impl Translation {
@@ -52,6 +64,32 @@ impl Translation {
 
     pub fn get_jalr_patch_point(&self, exc_offset: u32) -> Option<JalrPatchPoint> {
         self.jalr_patch_points.get(&exc_offset).cloned()
+    }
+
+    pub fn get_load_store_patch_point(&self, exc_offset: u32) -> Option<LoadStorePatchPoint> {
+        self.load_store_patch_points.get(&exc_offset).cloned()
+    }
+
+    pub fn patch_load_store(&mut self, exc_offset: u32, target_section: &Section) {
+        let pp = match self.get_load_store_patch_point(exc_offset) {
+            Some(x) => x,
+            None => panic!("Translation::patch_load_store: cannot find patch point"),
+        };
+
+        let lower_bound = target_section.base_v;
+        let upper_bound = target_section.base_v + target_section.data.get().len() as u64 - (pp.access_size - 1) as u64;
+        let reloff = (target_section.data.get().as_ptr() as u64).wrapping_sub(target_section.base_v);
+
+        self.backing.alter(|m| {
+            m.goto(AssemblyOffset(pp.lower_bound_offset as _));
+            codegen::ld_imm64(m, 30, lower_bound);
+
+            m.goto(AssemblyOffset(pp.upper_bound_offset as _));
+            codegen::ld_imm64(m, 30, upper_bound);
+
+            m.goto(AssemblyOffset(pp.reloff_offset as _));
+            codegen::ld_imm64(m, 30, reloff);
+        }).unwrap();
     }
 
     pub fn patch_jalr(&mut self, exc_offset: u32, target_base_v: u64, target: Option<&Translation>) {

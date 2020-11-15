@@ -72,7 +72,7 @@ impl Runtime {
             };
             let e = section.run(self).unwrap_err();
             match e {
-                ExecError::GlobalJump => {
+                ExecError::Retry => {
                     
                 }
                 _ => return Err(e)
@@ -275,7 +275,29 @@ impl Section {
                 rt.write_register(pp.rd as _, link_vpc);
                 rt.vpc = jalr_target;
 
-                Err(ExecError::GlobalJump)
+                Err(ExecError::Retry)
+            }
+            error::ERROR_REASON_LOAD_STORE_MISS => {
+                let pp = translation.get_load_store_patch_point(exc_offset).expect("handle_exit: cannot get load-store patch point");
+                let addr = rt.read_register(pp.rs as _) + (pp.rs_offset as i64 as u64);
+                println!("load/store miss. target = 0x{:016x}", addr);
+
+                let target_section = match rt.lookup_section(addr) {
+                    Some(x) => x,
+                    None => return Err(ExecError::BadLoadStoreAddress),
+                };
+
+                // TODO: bookkeeping
+                if pp.is_store && !target_section.data.get_flags().contains(SectionFlags::W) {
+                    return Err(ExecError::BadLoadStoreFlags);
+                }
+
+                if !pp.is_store && !target_section.data.get_flags().contains(SectionFlags::R) {
+                    return Err(ExecError::BadLoadStoreFlags);
+                }
+
+                translation.patch_load_store(exc_offset, &target_section);
+                Err(ExecError::Retry)
             }
             _ => {
                 panic!("Unknown error reason: {}", rt.error_reason);
