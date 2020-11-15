@@ -208,95 +208,100 @@ impl<'a> Codegen<'a> {
             0b1100111 => {
                 // jalr
                 let imm = i_itype_imm(inst);
-                let (rd, rs, rd_h, rs_h) = self.spill.map_register_tuple_w_r(&mut self.a, i_rd(inst) as _, i_rs(inst) as _);
-                let (t0, t0_h) = self.spill.mk_temp(&mut self.a, &[i_rd(inst) as _, i_rs(inst) as _]);
-
-                // XXX: Don't use rd as buffer! In case rd == xzr.
-                let (t1, t1_h) = self.spill.mk_temp(&mut self.a, &[i_rd(inst) as _, i_rs(inst) as _]);
-
-                ld_simm16(&mut self.a, 30, imm);
-                dynasm!(self.a
-                    ; .arch aarch64
-                    ; add X(t1 as u32), x30, X(rs as u32) // use rd as a buffer here
-                );
-
-                // Upper bound
-                let pp_upper = self.a.offset().0;
-                ld_imm64(&mut self.a, 30, 0); // PATCH
-                dynasm!(self.a
-                    ; .arch aarch64
-                    ; cmp X(t1 as u32), x30
-                    ; b.hs >fallback
-                );
-
-                // Lower bound
-                let pp_lower = self.a.offset().0;
-                ld_imm64(&mut self.a, 30, std::u64::MAX); // PATCH
-                dynasm!(self.a
-                    ; .arch aarch64
-                    ; cmp X(t1 as u32), x30
-                    ; b.lo >fallback
-                    ; sub X(t1 as u32), X(t1 as u32), x30
-                );
-
-                // V/real offset table
-                let pp_v2real_table = self.a.offset().0;
-                ld_imm64(&mut self.a, 30, 0); // PATCH
-
-                // Load real offset from v2real table
-                dynasm!(self.a
-                    ; .arch aarch64
-                    ; lsr X(t1 as u32), X(t1 as u32), 1
-                    ; lsl X(t1 as u32), X(t1 as u32), 2
-                    ; add x30, X(t1 as u32), x30
-                    ; ldr W(t0 as u32), [x30]
-                );
-
-                // Machine code base
-                let pp_machine_base = self.a.offset().0;
-                ld_imm64(&mut self.a, 30, 0); // PATCH
-                dynasm!(self.a
-                    ; .arch aarch64
-                    ; add x30, X(t0 as u32), x30 // compute actual address by base + offset
-                    ; b >ok
-                );
-
-                dynasm!(self.a
-                    ; .arch aarch64
-                    ; fallback:
-                );
-
-                let pp = JalrPatchPoint {
-                    lower_bound_offset: pp_lower as u32,
-                    upper_bound_offset: pp_upper as u32,
-                    v2real_table_offset: pp_v2real_table as u32,
-                    machine_base_offset: pp_machine_base as u32,
-                    rd: i_rd(inst) as u32,
-                    rs: i_rs(inst) as u32,
-                    rs_offset: imm as i32,
-                };
-                self.emit_exception(vpc, error::ERROR_REASON_JALR_MISS);
-                let asm_offset = self.a.offset().0;
-                self.jalr_patch_points.insert(asm_offset as u32, pp);
-
-                dynasm!(self.a
-                    ; .arch aarch64
-                    ; ok:
-                );
-                ld_imm64(&mut self.a, rd, vpc + 4);
-
-                self.spill.release_temp(&mut self.a, t0_h);
-                self.spill.release_temp(&mut self.a, t1_h);
-                self.spill.release_register_r(&mut self.a, rs_h);
-                self.spill.release_register_w(&mut self.a, rd_h);
-
-                dynasm!(self.a
-                    ; .arch aarch64
-                    ; br x30
-                );
+                self.emit_jalr(vpc, i_rd(inst) as _, i_rs(inst) as _, imm)
             }
             _ => self.emit_ud(vpc, inst)
         }
+    }
+
+    fn emit_jalr(&mut self, vpc: u64, raw_rd: u32, raw_rs: u32, imm: u32) {
+        let (rd, rs, rd_h, rs_h) = self.spill.map_register_tuple_w_r(&mut self.a, raw_rd as _, raw_rs as _);
+        let (t0, t0_h) = self.spill.mk_temp(&mut self.a, &[raw_rd as _, raw_rs as _]);
+
+        // XXX: Don't use rd as buffer! In case rd == xzr.
+        let (t1, t1_h) = self.spill.mk_temp(&mut self.a, &[raw_rd as _, raw_rs as _]);
+
+        ld_simm16(&mut self.a, 30, imm);
+        dynasm!(self.a
+            ; .arch aarch64
+            ; add X(t1 as u32), x30, X(rs as u32) // use rd as a buffer here
+        );
+
+        // Upper bound
+        let pp_upper = self.a.offset().0;
+        ld_imm64(&mut self.a, 30, 0); // PATCH
+        dynasm!(self.a
+            ; .arch aarch64
+            ; cmp X(t1 as u32), x30
+            ; b.hs >fallback
+        );
+
+        // Lower bound
+        let pp_lower = self.a.offset().0;
+        ld_imm64(&mut self.a, 30, std::u64::MAX); // PATCH
+        dynasm!(self.a
+            ; .arch aarch64
+            ; cmp X(t1 as u32), x30
+            ; b.lo >fallback
+            ; sub X(t1 as u32), X(t1 as u32), x30
+        );
+
+        // V/real offset table
+        let pp_v2real_table = self.a.offset().0;
+        ld_imm64(&mut self.a, 30, 0); // PATCH
+
+        // Load real offset from v2real table
+        dynasm!(self.a
+            ; .arch aarch64
+            ; lsr X(t1 as u32), X(t1 as u32), 1
+            ; lsl X(t1 as u32), X(t1 as u32), 2
+            ; add x30, X(t1 as u32), x30
+            ; ldr W(t0 as u32), [x30]
+        );
+
+        // Machine code base
+        let pp_machine_base = self.a.offset().0;
+        ld_imm64(&mut self.a, 30, 0); // PATCH
+        dynasm!(self.a
+            ; .arch aarch64
+            ; add x30, X(t0 as u32), x30 // compute actual address by base + offset
+            ; b >ok
+        );
+
+        dynasm!(self.a
+            ; .arch aarch64
+            ; fallback:
+        );
+
+        let pp = JalrPatchPoint {
+            lower_bound_offset: pp_lower as u32,
+            upper_bound_offset: pp_upper as u32,
+            v2real_table_offset: pp_v2real_table as u32,
+            machine_base_offset: pp_machine_base as u32,
+            rd: raw_rd as u32,
+            rs: raw_rs as u32,
+            rs_offset: imm as i32,
+        };
+        self.emit_exception(vpc, error::ERROR_REASON_JALR_MISS);
+        let asm_offset = self.a.offset().0;
+        self.jalr_patch_points.insert(asm_offset as u32, pp);
+
+        dynasm!(self.a
+            ; .arch aarch64
+            ; ok:
+        );
+        ld_imm64(&mut self.a, rd, vpc + 4);
+
+        self.spill.release_temp(&mut self.a, t0_h);
+        self.spill.release_temp(&mut self.a, t1_h);
+        self.spill.release_register_r(&mut self.a, rs_h);
+        self.spill.release_register_w(&mut self.a, rd_h);
+
+        dynasm!(self.a
+            ; .arch aarch64
+            ; br x30
+        );
+        
     }
 
     fn emit_rtype(&mut self, vpc: u64, inst: u32, rd: usize, rs: usize, rt: usize) {
