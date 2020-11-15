@@ -1,5 +1,4 @@
 use crate::config::*;
-use bitflags::bitflags;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use crate::translation::{Translation, VirtualReg, register_map_policy};
@@ -7,6 +6,7 @@ use dynasmrt::AssemblyOffset;
 use std::sync::Mutex;
 use crate::error::{self, ExecError};
 use bit_field::BitField;
+use crate::section::{SectionData, SectionFlags};
 
 #[repr(C)]
 pub struct Runtime {
@@ -107,7 +107,7 @@ impl Runtime {
     pub fn lookup_section(&self, addr: u64) -> Option<Arc<Section>> {
         let target = self.sections.range(..=addr).rev().next();
         match target {
-            Some((_, x)) if x.base_v + (x.data.len() as u64) > addr => {
+            Some((_, x)) if x.base_v + (x.data.get().len() as u64) > addr => {
                 Some(x.clone())
             }
             _ => None
@@ -122,14 +122,14 @@ impl Runtime {
             return false;
         }
 
-        let section_end = match section_start.checked_add(section.data.len() as u64) {
+        let section_end = match section_start.checked_add(section.data.get().len() as u64) {
             Some(x) => x,
             None => return false,
         };
 
         // Overlapping case 1
         if let Some((_, s)) = self.sections.range(..=section_start).rev().next() {
-            if s.base_v + s.data.len() as u64 > section_start {
+            if s.base_v + s.data.get().len() as u64 > section_start {
                 return false;
             }
         }
@@ -148,7 +148,7 @@ impl Runtime {
     pub fn remove_section(&mut self, addr: u64) -> bool {
         let target = self.sections.range(..=addr).rev().next();
         match target {
-            Some((&k, x)) if x.base_v + (x.data.len() as u64) > addr => {
+            Some((&k, x)) if x.base_v + (x.data.get().len() as u64) > addr => {
                 self.sections.remove(&k);
                 true
             }
@@ -174,29 +174,27 @@ impl Runtime {
 
 pub struct Section {
     pub base_v: u64,
-    pub flags: SectionFlags,
-    pub data: Vec<u8>,
+    pub data: SectionData,
     translation: Box<Mutex<Option<Translation>>>,
 }
 
 impl Section {
-    pub fn new(base_v: u64, flags: SectionFlags, data: Vec<u8>) -> Self {
+    pub fn new(base_v: u64, data: SectionData) -> Self {
         Self {
             base_v,
-            flags,
             data,
             translation: Box::new(Mutex::new(None)),
         }
     }
 
     fn ensure_translation(&self) -> Result<(), ExecError> {
-        if !self.flags.contains(SectionFlags::X) {
+        if !self.data.get_flags().contains(SectionFlags::X) {
             return Err(ExecError::NoX);
         }
 
         let mut translation = self.translation.lock().unwrap();
         if translation.is_none() {
-            *translation = Some(Translation::new(self.base_v, &self.data));
+            *translation = Some(Translation::new(self.base_v, self.data.get()));
         }
 
         Ok(())
@@ -285,14 +283,5 @@ impl Section {
                 panic!("Unknown error reason: {}", rt.error_reason);
             }
         }
-    }
-}
-
-bitflags! {
-    pub struct SectionFlags: u16 {
-        const R = 1;
-        const W = 2;
-        const X = 4;
-        const COW = 8;
     }
 }
