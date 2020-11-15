@@ -8,6 +8,7 @@ use std::io::{Read, Write};
 use log::debug;
 use rvjit_aa64::elf;
 use std::fs::File;
+use std::time::SystemTime;
 
 const STACK_SIZE: usize = 65536;
 
@@ -39,7 +40,10 @@ fn main() {
                 debug!("Ebreak at 0x{:016x}", rt.vpc);
                 break;
             }
-            _ => panic!("Runtime error: {:?}", e),
+            _ => {
+                rt.debug_print_registers();
+                panic!("Runtime error: {:?}", e);
+            }
         }
     }
 }
@@ -62,6 +66,10 @@ impl Host {
                 let c = rt.read_register(11) as u8;
                 let mut stdout = std::io::stdout();
                 stdout.write_all(&[c]).unwrap();
+            }
+            1 => {
+                let millis = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
+                rt.write_register(10, millis as u64);
             }
             _ => panic!("handle_ecall: invalid syscall")
         }
