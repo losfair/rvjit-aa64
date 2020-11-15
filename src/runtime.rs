@@ -7,6 +7,7 @@ use std::sync::Mutex;
 use crate::error::{self, ExecError};
 use bit_field::BitField;
 use crate::section::{SectionData, SectionFlags};
+use log::debug;
 
 #[repr(C)]
 pub struct Runtime {
@@ -161,7 +162,7 @@ impl Runtime {
     pub fn debug_print_registers(&self) {
         for i in 0..32 {
             let v = self.read_register(i);
-            println!("x{} = 0x{:016x}", i, v);
+            debug!("x{} = 0x{:016x}", i, v);
         }
     }
 
@@ -272,11 +273,11 @@ impl Section {
                 let exc_point = translation.get_exception_point(exc_offset).expect("Section::run: cannot find exception point");
                 let exit_vpc = self.base_v + (exc_point.v_offset as u64);
 
-                println!("EXIT at vpc 0x{:016x}", exit_vpc);
+                debug!("EXIT at vpc 0x{:016x}", exit_vpc);
 
                 rt.vpc = exit_vpc;
                 rt.unspill(exc_point.spill_mask);
-                rt.debug_print_registers();
+                //rt.debug_print_registers();
 
                 match self.handle_exit(rt, translation, exc_offset) {
                     Ok(_) => {
@@ -304,7 +305,7 @@ impl Section {
             error::ERROR_REASON_JALR_MISS => {
                 let pp = translation.get_jalr_patch_point(exc_offset).expect("handle_exit: cannot get jalr patch point");
                 let jalr_target = rt.read_register(pp.rs as _) + (pp.rs_offset as i64 as u64);
-                println!("JALR miss. Jump target = 0x{:016x}", jalr_target);
+                debug!("JALR miss. Jump target = 0x{:016x}", jalr_target);
 
                 let target_section = match rt.lookup_section(jalr_target) {
                     Some(x) => x,
@@ -326,7 +327,7 @@ impl Section {
             error::ERROR_REASON_LOAD_STORE_MISS => {
                 let pp = translation.get_load_store_patch_point(exc_offset).expect("handle_exit: cannot get load-store patch point");
                 let addr = rt.read_register(pp.rs as _) + (pp.rs_offset as i64 as u64);
-                println!("load/store miss. target = 0x{:016x}", addr);
+                debug!("load/store miss. target = 0x{:016x}", addr);
 
                 let target_section = match rt.lookup_section(addr) {
                     Some(x) => x,
@@ -351,6 +352,14 @@ impl Section {
 
                 translation.patch_load_store(exc_offset, &target_section);
                 Err(ExecError::Retry)
+            }
+            error::ERROR_REASON_ECALL => {
+                rt.vpc += 4;
+                Err(ExecError::Ecall)
+            }
+            error::ERROR_REASON_EBREAK => {
+                rt.vpc += 4;
+                Err(ExecError::Ebreak)
             }
             _ => {
                 panic!("Unknown error reason: {}", rt.error_reason);

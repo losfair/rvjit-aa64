@@ -7,6 +7,7 @@ use crate::error;
 use byteorder::{LittleEndian, ReadBytesExt};
 use crate::translation::{ExceptionPoint, VirtualReg, register_map_policy, Translation, JalrPatchPoint, LoadStorePatchPoint};
 use std::collections::BTreeMap;
+use log::debug;
 
 pub struct Codegen<'a> {
     a: Assembler,
@@ -331,6 +332,17 @@ impl<'a> Codegen<'a> {
                         });
                     }
                     _ => self.emit_ud(vpc, inst)
+                }
+            }
+            0b1110011 => {
+                // ecall/ebreak
+                let imm = i_itype_imm(inst);
+                if imm & 0b1 == 0 {
+                    // ecall
+                    self.emit_exception(vpc, error::ERROR_REASON_ECALL);
+                } else {
+                    // ebreak
+                    self.emit_exception(vpc, error::ERROR_REASON_EBREAK);
                 }
             }
             _ => self.emit_ud(vpc, inst)
@@ -882,7 +894,7 @@ impl<'a> Codegen<'a> {
     }
 
     fn emit_exception(&mut self, vpc: u64, reason: u16) {
-        println!("static exception @ 0x{:016x}: reason {}", vpc, reason);
+        debug!("static exception @ 0x{:016x}: reason {}", vpc, reason);
 
         ld_simm16(&mut self.a, 30, reason as u32);
 
