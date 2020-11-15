@@ -8,8 +8,17 @@ pub enum ExecError {
     #[error("attempting to execute code in an NX section")]
     NoX,
 
-    #[error("bad indirect jump target")]
-    BadJalr,
+    #[error("undefined instruction")]
+    UndefinedInstruction,
+
+    #[error("branch out of bounds")]
+    BranchOob,
+
+    #[error("bad instruction pointer")]
+    BadPC,
+
+    #[error("global jump")]
+    GlobalJump,
 }
 
 pub(crate) const ERROR_REASON_UNDEFINED_INSTRUCTION: u16 = 1;

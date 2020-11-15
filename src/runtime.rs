@@ -6,6 +6,7 @@ use crate::translation::{Translation, VirtualReg, register_map_policy};
 use dynasmrt::AssemblyOffset;
 use std::sync::Mutex;
 use crate::error::{self, ExecError};
+use bit_field::BitField;
 
 #[repr(C)]
 pub struct Runtime {
@@ -15,6 +16,8 @@ pub struct Runtime {
     memory_regs: [u64; 4],
     spill: [u64; 32], // FIXME: only the first 256 bytes of Runtime are directly addressable so latter spill locations may not be accessible
     guest_save: [u64; 32],
+
+    pub vpc: u64,
     sections: Box<BTreeMap<u64, Arc<Section>>>,
 }
 
@@ -53,16 +56,28 @@ impl Runtime {
             memory_regs: [0; 4],
             spill: [0; 32],
             guest_save: [0; 32],
+
+            vpc: 0,
             sections: Box::new(BTreeMap::new()),
         }
     }
 
-    pub fn run(&mut self, vpc: u64) -> Result<(), ExecError> {
-        let section = self.lookup_section(vpc).expect("Runtime::run: section not found");
-        if !section.flags.contains(SectionFlags::X) {
-            panic!("Runtime::run: bad section permissions");
+    pub fn run(&mut self) -> Result<(), ExecError> {
+        self.vpc &= !1u64; // to match the behavior of JIT
+
+        loop {
+            let section = match self.lookup_section(self.vpc) {
+                Some(x) => x,
+                None => return Err(ExecError::BadPC),
+            };
+            let e = section.run(self).unwrap_err();
+            match e {
+                ExecError::GlobalJump => {
+                    
+                }
+                _ => return Err(e)
+            }
         }
-        section.run(self, vpc)
     }
 
     pub fn error_reason(&self) -> u16 {
@@ -147,6 +162,14 @@ impl Runtime {
             println!("x{} = 0x{:016x}", i, v);
         }
     }
+
+    fn unspill(&mut self, mask: u32) {
+        for i in 0..31 {
+            if mask.get_bit(i) {
+                self.guest_save[i] = self.spill[i];
+            }
+        }
+    }
 }
 
 pub struct Section {
@@ -179,10 +202,10 @@ impl Section {
         Ok(())
     }
 
-    fn run(&self, rt: &mut Runtime, vpc: u64) -> Result<(), ExecError> {
+    fn run(&self, rt: &mut Runtime) -> Result<(), ExecError> {
         self.ensure_translation()?;
     
-        let v_offset = vpc.checked_sub(self.base_v).expect("Section::run: invalid address") as u32;
+        let v_offset = rt.vpc.checked_sub(self.base_v).expect("Section::run: invalid address") as u32;
         let mut translation = self.translation.lock().unwrap();
         let translation = translation.as_mut().unwrap();
         match translation.translate_v_offset(v_offset) {
@@ -203,42 +226,63 @@ impl Section {
                     }
 
                     let exc_offset = (rt.guest_save[30] - base) as u32;
-                    let exit_v_offset = translation.translate_exception_offset(exc_offset).expect("Section::run: cannot find exception offset");
-                    let exit_vpc = self.base_v + (exit_v_offset as u64);
+                    let exc_point = translation.get_exception_point(exc_offset).expect("Section::run: cannot find exception point");
+                    let exit_vpc = self.base_v + (exc_point.v_offset as u64);
 
                     println!("EXIT at vpc 0x{:016x}", exit_vpc);
+
+                    rt.vpc = exit_vpc;
+                    rt.unspill(exc_point.spill_mask);
                     rt.debug_print_registers();
 
-                    match rt.error_reason as u16 {
-                        error::ERROR_REASON_JALR_MISS => {
-                            let jalr_target = rt.error_data;
-                            println!("JALR miss. target = 0x{:016x}", jalr_target);
-
-                            let target_section = match rt.lookup_section(jalr_target) {
-                                Some(x) => x,
-                                None => return Err(ExecError::BadJalr),
-                            };
-
-                            if target_section.base_v == self.base_v {
-                                // TODO: Better way of detecting equivalence?
-                                translation.patch_jalr(exc_offset, self.base_v, None);
-                            } else {
-                                target_section.ensure_translation()?;
-                                let target_translation = target_section.translation.lock().unwrap();
-                                let target_translation = target_translation.as_ref().unwrap();
-                                translation.patch_jalr(exc_offset, target_section.base_v, Some(target_translation));
-                            }
-
-                            real_offset = AssemblyOffset(exc_offset as _);
+                    match self.handle_exit(rt, translation, exc_offset) {
+                        Ok(_) => {
+                            panic!("unexpected Ok from handle_exit");
                         }
-                        _ => {
-                            panic!("Unknown error reason: {}", rt.error_reason);
+                        Err(e) => {
+                            return Err(e);
                         }
                     }
                 }
             }
             None => {
                 panic!("Section::run: invalid v-offset");
+            }
+        }
+    }
+
+    fn handle_exit(&self, rt: &mut Runtime, translation: &mut Translation, exc_offset: u32) -> Result<(), ExecError> {
+        match rt.error_reason as u16 {
+            error::ERROR_REASON_UNDEFINED_INSTRUCTION => {
+                Err(ExecError::UndefinedInstruction)
+            }
+            error::ERROR_REASON_BRANCH_OOB => {
+                Err(ExecError::BranchOob)
+            }
+            error::ERROR_REASON_JALR_MISS => {
+                let pp = translation.get_jalr_patch_point(exc_offset).expect("handle_exit: cannot get jalr patch point");
+                let jalr_target = rt.read_register(pp.rs as _) + (pp.rs_offset as i64 as u64);
+                println!("JALR miss. Jump target = 0x{:016x}", jalr_target);
+
+                let target_section = match rt.lookup_section(jalr_target) {
+                    Some(x) => x,
+                    None => return Err(ExecError::BadPC),
+                };
+
+                // Fast path for jumping into the same section.
+                if target_section.base_v == self.base_v {
+                    // TODO: Better way of detecting equivalence?
+                    translation.patch_jalr(exc_offset, self.base_v, None);
+                }
+
+                let link_vpc = rt.vpc + 4;
+                rt.write_register(pp.rd as _, link_vpc);
+                rt.vpc = jalr_target;
+
+                Err(ExecError::GlobalJump)
+            }
+            _ => {
+                panic!("Unknown error reason: {}", rt.error_reason);
             }
         }
     }

@@ -6,9 +6,15 @@ use crate::runtime::Section;
 
 pub struct Translation {
     pub v_offset_to_translation_offset: Box<[u32]>,
-    pub exception_translation_offset_to_v_offset: BTreeMap<u32, u32>,
+    pub exception_points: BTreeMap<u32, ExceptionPoint>,
     pub jalr_patch_points: BTreeMap<u32, JalrPatchPoint>,
     pub backing: Assembler,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct ExceptionPoint {
+    pub v_offset: u32,
+    pub spill_mask: u32,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -17,6 +23,9 @@ pub struct JalrPatchPoint {
     pub upper_bound_offset: u32,
     pub v2real_table_offset: u32,
     pub machine_base_offset: u32,
+    pub rd: u32,
+    pub rs: u32,
+    pub rs_offset: i32,
 }
 
 impl Translation {
@@ -37,8 +46,8 @@ impl Translation {
         }
     }
 
-    pub fn translate_exception_offset(&self, exc_offset: u32) -> Option<u32> {
-        self.exception_translation_offset_to_v_offset.get(&exc_offset).cloned()
+    pub fn get_exception_point(&self, exc_offset: u32) -> Option<ExceptionPoint> {
+        self.exception_points.get(&exc_offset).cloned()
     }
 
     pub fn get_jalr_patch_point(&self, exc_offset: u32) -> Option<JalrPatchPoint> {

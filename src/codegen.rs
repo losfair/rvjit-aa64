@@ -5,7 +5,7 @@ use std::rc::Rc;
 use crate::runtime::Runtime;
 use crate::error;
 use byteorder::{LittleEndian, ReadBytesExt};
-use crate::translation::{VirtualReg, register_map_policy, Translation, JalrPatchPoint};
+use crate::translation::{ExceptionPoint, VirtualReg, register_map_policy, Translation, JalrPatchPoint};
 use std::collections::BTreeMap;
 
 pub struct Codegen<'a> {
@@ -14,7 +14,7 @@ pub struct Codegen<'a> {
     spill: SpillMachine,
     raw: &'a [u8],
     v_offset_to_translation_offset: Box<[u32]>,
-    exception_translation_offset_to_v_offset: BTreeMap<u32, u32>,
+    exception_points: BTreeMap<u32, ExceptionPoint>,
     jalr_patch_points: BTreeMap<u32, JalrPatchPoint>,
     relative_br_labels: Box<[DynamicLabel]>,
 }
@@ -32,7 +32,7 @@ impl<'a> Codegen<'a> {
             spill: SpillMachine::new(),
             raw,
             v_offset_to_translation_offset,
-            exception_translation_offset_to_v_offset: BTreeMap::new(),
+            exception_points: BTreeMap::new(),
             jalr_patch_points: BTreeMap::new(),
             relative_br_labels,
         }
@@ -60,7 +60,7 @@ impl<'a> Codegen<'a> {
         Translation {
             backing: self.a,
             v_offset_to_translation_offset: self.v_offset_to_translation_offset,
-            exception_translation_offset_to_v_offset: self.exception_translation_offset_to_v_offset,
+            exception_points: self.exception_points,
             jalr_patch_points: self.jalr_patch_points,
         }
     }
@@ -218,7 +218,6 @@ impl<'a> Codegen<'a> {
                 dynasm!(self.a
                     ; .arch aarch64
                     ; add X(t1 as u32), x30, X(rs as u32) // use rd as a buffer here
-                    ; jalr_check:
                 );
 
                 // Upper bound
@@ -265,7 +264,6 @@ impl<'a> Codegen<'a> {
                 dynasm!(self.a
                     ; .arch aarch64
                     ; fallback:
-                    ; str X(t1 as u32), [X(runtime_reg() as u32), Runtime::offset_error_data() as u32]
                 );
 
                 let pp = JalrPatchPoint {
@@ -273,16 +271,13 @@ impl<'a> Codegen<'a> {
                     upper_bound_offset: pp_upper as u32,
                     v2real_table_offset: pp_v2real_table as u32,
                     machine_base_offset: pp_machine_base as u32,
+                    rd: i_rd(inst) as u32,
+                    rs: i_rs(inst) as u32,
+                    rs_offset: imm as i32,
                 };
                 self.emit_exception(vpc, error::ERROR_REASON_JALR_MISS);
                 let asm_offset = self.a.offset().0;
                 self.jalr_patch_points.insert(asm_offset as u32, pp);
-
-                // Retry.
-                dynasm!(self.a
-                    ; .arch aarch64
-                    ; b <jalr_check
-                );
 
                 dynasm!(self.a
                     ; .arch aarch64
@@ -633,7 +628,12 @@ impl<'a> Codegen<'a> {
             ; blr x30
         );
         let translation_offset = self.a.offset().0 as u32;
-        self.exception_translation_offset_to_v_offset.insert(translation_offset, (vpc - self.base_vpc) as u32);
+        let v_offset = (vpc - self.base_vpc) as u32;
+        let spill_mask = self.spill.spilled_regs.get();
+        self.exception_points.insert(translation_offset, ExceptionPoint {
+            v_offset,
+            spill_mask,
+        });
     }
 
     fn emit_ud(&mut self, vpc: u64, _inst: u32) {
@@ -650,7 +650,6 @@ impl SpillMachine {
         let mut spilled_regs: u32 = 0;
 
         // No spill
-        spilled_regs.set_bit(0, true);
         spilled_regs.set_bit(2, true);
         spilled_regs.set_bit(30, true);
 

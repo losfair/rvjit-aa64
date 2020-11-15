@@ -9,5 +9,7 @@ fn main() {
     let section = Section::new(0x10000, SectionFlags::R | SectionFlags::X, IMAGE.to_vec());
     let mut rt = Runtime::new();
     assert!(rt.add_section(Arc::new(section)));
-    rt.run(0x10000).unwrap();
+
+    rt.vpc = 0x10000;
+    rt.run().unwrap();
 }
