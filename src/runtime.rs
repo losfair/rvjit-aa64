@@ -208,38 +208,36 @@ impl Section {
         let translation = translation.as_mut().unwrap();
         match translation.translate_v_offset(v_offset) {
             Some(x) => {
-                let mut real_offset = AssemblyOffset(x as _);
-                loop {
-                    let ptr;
-                    let base;
+                let real_offset = AssemblyOffset(x as _);
+                let ptr;
+                let base;
 
-                    {
-                        let executor = translation.backing.reader();
-                        let executor = executor.lock();
-                        base = executor.ptr(AssemblyOffset(0)) as u64;
-                        ptr = executor.ptr(real_offset) as u64;
-                        unsafe {
-                            crate::entry_exit::_rvjit_enter_guest(rt, ptr);
-                        }
+                {
+                    let executor = translation.backing.reader();
+                    let executor = executor.lock();
+                    base = executor.ptr(AssemblyOffset(0)) as u64;
+                    ptr = executor.ptr(real_offset) as u64;
+                    unsafe {
+                        crate::entry_exit::_rvjit_enter_guest(rt, ptr);
                     }
+                }
 
-                    let exc_offset = (rt.guest_save[30] - base) as u32;
-                    let exc_point = translation.get_exception_point(exc_offset).expect("Section::run: cannot find exception point");
-                    let exit_vpc = self.base_v + (exc_point.v_offset as u64);
+                let exc_offset = (rt.guest_save[30] - base) as u32;
+                let exc_point = translation.get_exception_point(exc_offset).expect("Section::run: cannot find exception point");
+                let exit_vpc = self.base_v + (exc_point.v_offset as u64);
 
-                    println!("EXIT at vpc 0x{:016x}", exit_vpc);
+                println!("EXIT at vpc 0x{:016x}", exit_vpc);
 
-                    rt.vpc = exit_vpc;
-                    rt.unspill(exc_point.spill_mask);
-                    rt.debug_print_registers();
+                rt.vpc = exit_vpc;
+                rt.unspill(exc_point.spill_mask);
+                rt.debug_print_registers();
 
-                    match self.handle_exit(rt, translation, exc_offset) {
-                        Ok(_) => {
-                            panic!("unexpected Ok from handle_exit");
-                        }
-                        Err(e) => {
-                            return Err(e);
-                        }
+                match self.handle_exit(rt, translation, exc_offset) {
+                    Ok(_) => {
+                        panic!("unexpected Ok from handle_exit");
+                    }
+                    Err(e) => {
+                        Err(e)
                     }
                 }
             }
