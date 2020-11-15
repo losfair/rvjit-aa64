@@ -145,6 +145,7 @@ impl Translation {
 
 #[derive(Copy, Clone, Debug)]
 pub enum VirtualReg {
+    Zero,
     Native(usize),
     Memory(usize),
 }
@@ -154,12 +155,14 @@ pub fn register_map_policy(x: usize) -> VirtualReg {
 
     // Reserve x2 and x30
     match x {
-        0 => Native(31), // zero
+        0 => Zero,
         1 => Native(0),
         2 => Native(1),
         3 => Memory(0),
         4 => Memory(1),
-        x if x >= 5 && x <= 31 => Native(x - 2),
+        x if x >= 5 && x <= 29 => Native(x - 2),
+        30 => Memory(2),
+        31 => Memory(3),
         _ => unreachable!(),
     }
 }

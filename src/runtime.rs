@@ -90,6 +90,7 @@ impl Runtime {
         match register_map_policy(index) {
             VirtualReg::Native(i) => self.guest_save[i],
             VirtualReg::Memory(i) => self.memory_regs[i],
+            VirtualReg::Zero => 0,
         }
     }
 
@@ -102,6 +103,7 @@ impl Runtime {
             VirtualReg::Memory(i) => {
                 self.memory_regs[i] = value;
             }
+            VirtualReg::Zero => {}
         }
     }
 

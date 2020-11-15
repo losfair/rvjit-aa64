@@ -1148,6 +1148,8 @@ impl SpillMachine {
 
         // No spill
         spilled_regs.set_bit(2, true);
+        spilled_regs.set_bit(28, true);
+        spilled_regs.set_bit(29, true);
         spilled_regs.set_bit(30, true);
 
         SpillMachine {
@@ -1159,6 +1161,7 @@ impl SpillMachine {
         dont_touch.iter().filter_map(|x| match register_map_policy(*x) {
             VirtualReg::Native(i) => Some(i),
             VirtualReg::Memory(_) => None,
+            VirtualReg::Zero => None,
         }).collect()
     }
 
@@ -1234,6 +1237,7 @@ impl SpillMachine {
                 }
                 panic!("map_register_r: no available registers");
             }
+            VirtualReg::Zero => (zero_reg_r(), None),
         }
     }
 
@@ -1266,6 +1270,7 @@ impl SpillMachine {
                 }
                 panic!("map_register_w: no available registers");
             }
+            VirtualReg::Zero => (zero_reg_w(), None),
         }
     }
 
@@ -1406,6 +1411,14 @@ pub(crate) fn ld_simm32<A: DynasmApi>(a: &mut A, rd: usize, imm: u32) {
 
 fn runtime_reg() -> usize {
     2
+}
+
+fn zero_reg_r() -> usize {
+    28
+}
+
+fn zero_reg_w() -> usize {
+    29
 }
 
 struct TempSpillHandle {
