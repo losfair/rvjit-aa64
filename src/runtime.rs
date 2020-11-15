@@ -120,8 +120,8 @@ impl Runtime {
     pub fn add_section(&mut self, section: Arc<Section>) -> bool {
         let section_start = section.base_v;
 
-        // Section alignment
-        if section_start % 4096 != 0 {
+        // Section alignment. TODO: Align to page size (4096)?
+        if section_start % 4 != 0 {
             return false;
         }
 

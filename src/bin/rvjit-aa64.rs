@@ -4,19 +4,26 @@ use rvjit_aa64::runtime::{Runtime, Section};
 use rvjit_aa64::section::{SectionData, SectionFlags};
 use rvjit_aa64::error::ExecError;
 use std::sync::Arc;
-use std::io::Write;
+use std::io::{Read, Write};
 use log::debug;
+use rvjit_aa64::elf;
+use std::fs::File;
 
-static IMAGE: &'static [u8] = include_bytes!("../../playground/play.bin");
+const STACK_SIZE: usize = 65536;
 
 fn main() {
     env_logger::init();
 
-    let section_code = Section::new(0x10000, SectionData::new(IMAGE.to_vec(), SectionFlags::R | SectionFlags::X));
-    let section_data = Section::new(0x20000, SectionData::new(vec![42u8; 65536], SectionFlags::R | SectionFlags::W));
+    let path = std::env::args().nth(1).expect("expecting path");
+
     let mut rt = Runtime::new();
-    assert!(rt.add_section(Arc::new(section_code)));
-    assert!(rt.add_section(Arc::new(section_data)));
+    let mut elf_image_file = File::open(&path).unwrap();
+    let mut elf_image = vec![0u8; 0];
+    elf_image_file.read_to_end(&mut elf_image).unwrap();
+
+    assert!(rt.add_section(Arc::new(Section::new(0x7fff00000000 - (STACK_SIZE as u64), SectionData::new(vec![0u8; STACK_SIZE], SectionFlags::R | SectionFlags::W)))));
+
+    elf::load(&mut rt, &elf_image).unwrap();
 
     let mut host = Host::new();
 
