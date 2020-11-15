@@ -44,6 +44,8 @@ impl<'a> Codegen<'a> {
     pub fn generate(&mut self) {
         let mut cursor = self.raw;
         let mut vpc = self.base_vpc;
+
+        let mut acc_size: usize = 0;
         while let Ok(x) = cursor.read_u32::<LittleEndian>() {
             let inst_offset = ((vpc - self.base_vpc) / 2) as usize;
             let label = self.relative_br_labels[inst_offset];
@@ -55,7 +57,17 @@ impl<'a> Codegen<'a> {
             );
             self.emit_once(vpc, x);
             vpc += 4;
+
+            let asm_offset = self.a.offset().0;
+
+            // Interval selected as Bcc max range - 1024.
+            if asm_offset - acc_size >= 1048576 - 1024 {
+                self.emit_periodic_tail();
+                acc_size = asm_offset;
+            }
         }
+
+        self.emit_periodic_tail();
         self.a.commit().expect("Codegen::generate: commit failed");
     }
 
@@ -351,13 +363,12 @@ impl<'a> Codegen<'a> {
 
     fn emit_load<F: FnOnce(&mut Self, u32, u32)>(&mut self, vpc: u64, raw_rd: u32, raw_rs: u32, imm: u32, access_size: u32, emit_inner: F) {
         let (rd, rs, rd_h, rs_h) = self.spill.map_register_tuple_w_r(&mut self.a, raw_rd as _, raw_rs as _);
-        let (t0, t0_h) = self.spill.mk_temp(&mut self.a, &[raw_rd as _, raw_rs as _]);
 
         // Compute effective address
-        ld_simm16(&mut self.a, t0 as _, imm);
+        ld_simm16(&mut self.a, trash_reg_w() as _, imm);
         dynasm!(self.a
             ; .arch aarch64
-            ; add X(t0 as u32), X(t0 as u32), X(rs as u32)
+            ; add X(trash_reg_w() as u32), X(trash_reg_w() as u32), X(rs as u32)
         );
 
         // Upper bound
@@ -366,7 +377,7 @@ impl<'a> Codegen<'a> {
         ld_imm64(&mut self.a, 30, 0); // PATCH
         dynasm!(self.a
             ; .arch aarch64
-            ; cmp X(t0 as u32), x30
+            ; cmp X(trash_reg_w() as u32), x30
             ; b.hs >fallback
         );
 
@@ -375,7 +386,7 @@ impl<'a> Codegen<'a> {
         ld_imm64(&mut self.a, 30, std::u64::MAX); // PATCH
         dynasm!(self.a
             ; .arch aarch64
-            ; cmp X(t0 as u32), x30
+            ; cmp X(trash_reg_w() as u32), x30
             ; b.lo >fallback
         );
 
@@ -384,10 +395,10 @@ impl<'a> Codegen<'a> {
         ld_imm64(&mut self.a, 30, std::u64::MAX); // PATCH
         dynasm!(self.a
             ; .arch aarch64
-            ; add X(t0 as u32), X(t0 as u32), x30
+            ; add X(trash_reg_w() as u32), X(trash_reg_w() as u32), x30
         );
 
-        emit_inner(self, rd as _, t0 as _);
+        emit_inner(self, rd as _, trash_reg_w() as _);
 
         dynasm!(self.a
             ; .arch aarch64
@@ -413,20 +424,18 @@ impl<'a> Codegen<'a> {
             ; ok:
         );
 
-        self.spill.release_temp(&mut self.a, t0_h);
         self.spill.release_register_r(&mut self.a, rs_h);
         self.spill.release_register_w(&mut self.a, rd_h);
     }
 
     fn emit_store<F: FnOnce(&mut Self, u32, u32)>(&mut self, vpc: u64, raw_rs: u32, raw_rt: u32, imm: u32, access_size: u32, emit_inner: F) {
         let (rs, rt, rs_h, rt_h) = self.spill.map_register_tuple_r_r(&mut self.a, raw_rs as _, raw_rt as _);
-        let (t0, t0_h) = self.spill.mk_temp(&mut self.a, &[raw_rs as _, raw_rt as _]);
 
         // Compute effective address
-        ld_simm16(&mut self.a, t0 as _, imm);
+        ld_simm16(&mut self.a, trash_reg_w() as _, imm);
         dynasm!(self.a
             ; .arch aarch64
-            ; add X(t0 as u32), X(t0 as u32), X(rs as u32)
+            ; add X(trash_reg_w() as u32), X(trash_reg_w() as u32), X(rs as u32)
         );
 
         // Upper bound
@@ -435,7 +444,7 @@ impl<'a> Codegen<'a> {
         ld_imm64(&mut self.a, 30, 0); // PATCH
         dynasm!(self.a
             ; .arch aarch64
-            ; cmp X(t0 as u32), x30
+            ; cmp X(trash_reg_w() as u32), x30
             ; b.hs >fallback
         );
 
@@ -444,7 +453,7 @@ impl<'a> Codegen<'a> {
         ld_imm64(&mut self.a, 30, std::u64::MAX); // PATCH
         dynasm!(self.a
             ; .arch aarch64
-            ; cmp X(t0 as u32), x30
+            ; cmp X(trash_reg_w() as u32), x30
             ; b.lo >fallback
         );
 
@@ -453,10 +462,10 @@ impl<'a> Codegen<'a> {
         ld_imm64(&mut self.a, 30, std::u64::MAX); // PATCH
         dynasm!(self.a
             ; .arch aarch64
-            ; add X(t0 as u32), X(t0 as u32), x30
+            ; add X(trash_reg_w() as u32), X(trash_reg_w() as u32), x30
         );
 
-        emit_inner(self, rt as _, t0 as _);
+        emit_inner(self, rt as _, trash_reg_w() as _);
 
         dynasm!(self.a
             ; .arch aarch64
@@ -482,22 +491,17 @@ impl<'a> Codegen<'a> {
             ; ok:
         );
 
-        self.spill.release_temp(&mut self.a, t0_h);
         self.spill.release_register_r(&mut self.a, rs_h);
         self.spill.release_register_r(&mut self.a, rt_h);
     }
 
     fn emit_jalr(&mut self, vpc: u64, raw_rd: u32, raw_rs: u32, imm: u32) {
         let (rd, rs, rd_h, rs_h) = self.spill.map_register_tuple_w_r(&mut self.a, raw_rd as _, raw_rs as _);
-        let (t0, t0_h) = self.spill.mk_temp(&mut self.a, &[raw_rd as _, raw_rs as _]);
-
-        // XXX: Don't use rd as buffer! In case rd == xzr.
-        let (t1, t1_h) = self.spill.mk_temp(&mut self.a, &[raw_rd as _, raw_rs as _]);
 
         ld_simm16(&mut self.a, 30, imm);
         dynasm!(self.a
             ; .arch aarch64
-            ; add X(t1 as u32), x30, X(rs as u32) // use rd as a buffer here
+            ; add X(trash_reg_w() as u32), x30, X(rs as u32)
         );
 
         // Upper bound
@@ -505,7 +509,7 @@ impl<'a> Codegen<'a> {
         ld_imm64(&mut self.a, 30, 0); // PATCH
         dynasm!(self.a
             ; .arch aarch64
-            ; cmp X(t1 as u32), x30
+            ; cmp X(trash_reg_w() as u32), x30
             ; b.hs >fallback
         );
 
@@ -514,9 +518,9 @@ impl<'a> Codegen<'a> {
         ld_imm64(&mut self.a, 30, std::u64::MAX); // PATCH
         dynasm!(self.a
             ; .arch aarch64
-            ; cmp X(t1 as u32), x30
+            ; cmp X(trash_reg_w() as u32), x30
             ; b.lo >fallback
-            ; sub X(t1 as u32), X(t1 as u32), x30
+            ; sub X(trash_reg_w() as u32), X(trash_reg_w() as u32), x30
         );
 
         // V/real offset table
@@ -526,14 +530,14 @@ impl<'a> Codegen<'a> {
         // Load real offset from v2real table
         dynasm!(self.a
             ; .arch aarch64
-            ; lsr X(t1 as u32), X(t1 as u32), 1
-            ; lsl X(t1 as u32), X(t1 as u32), 2
-            ; add x30, X(t1 as u32), x30
-            ; ldr W(t0 as u32), [x30]
+            ; lsr X(trash_reg_w() as u32), X(trash_reg_w() as u32), 1
+            ; lsl X(trash_reg_w() as u32), X(trash_reg_w() as u32), 2
+            ; add x30, X(trash_reg_w() as u32), x30
+            ; ldr W(trash_reg_w() as u32), [x30]
 
             // Check empty entries
-            ; add W(zero_reg_w() as u32), W(t0 as u32), 1
-            ; b.eq >fallback // branch if zero
+            ; cmn W(trash_reg_w() as u32), 1
+            ; b.eq >fallback // branch if value == u32::MAX
         );
 
         // Machine code base
@@ -541,7 +545,7 @@ impl<'a> Codegen<'a> {
         ld_imm64(&mut self.a, 30, 0); // PATCH
         dynasm!(self.a
             ; .arch aarch64
-            ; add x30, X(t0 as u32), x30 // compute actual address by base + offset
+            ; add x30, X(trash_reg_w() as u32), x30 // compute actual address by base + offset
             ; b >ok
         );
 
@@ -569,8 +573,6 @@ impl<'a> Codegen<'a> {
         );
         ld_imm64(&mut self.a, rd, vpc + 4);
 
-        self.spill.release_temp(&mut self.a, t0_h);
-        self.spill.release_temp(&mut self.a, t1_h);
         self.spill.release_register_r(&mut self.a, rs_h);
         self.spill.release_register_w(&mut self.a, rd_h);
 
@@ -1144,14 +1146,11 @@ impl<'a> Codegen<'a> {
     fn emit_exception(&mut self, vpc: u64, reason: u16) {
         debug!("static exception @ 0x{:016x}: reason {}", vpc, reason);
 
-        ld_simm16(&mut self.a, 30, reason as u32);
+        ld_simm16(&mut self.a, trash_reg_w() as _, reason as u32);
 
         dynasm!(self.a
             ; .arch aarch64
-            ; str x30, [X(runtime_reg() as u32), Runtime::offset_error_reason() as u32]
-
-            ; ldr x30, [X(runtime_reg() as u32), Runtime::offset_exception_entry() as u32]
-            ; blr x30
+            ; bl >tail_exception_exit
         );
         let translation_offset = self.a.offset().0 as u32;
         let v_offset = (vpc - self.base_vpc) as u32;
@@ -1160,6 +1159,20 @@ impl<'a> Codegen<'a> {
             v_offset,
             spill_mask,
         });
+    }
+
+    fn emit_periodic_tail(&mut self) {
+        dynasm!(self.a
+            ; .arch aarch64
+            ; b >after
+
+            ; tail_exception_exit:
+            ; str X(trash_reg_w() as u32), [X(runtime_reg() as u32), Runtime::offset_error_reason() as u32]
+            ; ldr X(trash_reg_w() as u32), [X(runtime_reg() as u32), Runtime::offset_exception_entry() as u32]
+            ; br X(trash_reg_w() as u32)
+
+            ; after:
+        );
     }
 
     fn emit_ud(&mut self, vpc: u64, _inst: u32) {
@@ -1299,7 +1312,7 @@ impl SpillMachine {
                 }
                 panic!("map_register_w: no available registers");
             }
-            VirtualReg::Zero => (zero_reg_w(), None),
+            VirtualReg::Zero => (trash_reg_w(), None),
         }
     }
 
@@ -1446,7 +1459,7 @@ fn zero_reg_r() -> usize {
     28
 }
 
-fn zero_reg_w() -> usize {
+fn trash_reg_w() -> usize {
     29
 }
 
