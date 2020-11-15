@@ -530,6 +530,10 @@ impl<'a> Codegen<'a> {
             ; lsl X(t1 as u32), X(t1 as u32), 2
             ; add x30, X(t1 as u32), x30
             ; ldr W(t0 as u32), [x30]
+
+            // Check empty entries
+            ; add W(zero_reg_w() as u32), W(t0 as u32), 1
+            ; b.eq >fallback // branch if zero
         );
 
         // Machine code base

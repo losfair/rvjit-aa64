@@ -17,6 +17,9 @@ pub enum ExecError {
     #[error("bad instruction pointer")]
     BadPC,
 
+    #[error("missing translation for instruction pointer")]
+    MissingTranslation,
+
     #[error("bad load/store address")]
     BadLoadStoreAddress,
 

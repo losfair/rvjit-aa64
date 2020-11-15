@@ -316,6 +316,13 @@ impl Section {
 
                 // Fast path for jumping into the same section.
                 if target_section.base_v == self.base_v {
+                    // Whether we got a table lookup failure
+                    match translation.translate_v_offset((jalr_target - target_section.base_v) as u32) {
+                        Some(_) => {}
+                        None => {
+                            return Err(ExecError::MissingTranslation);
+                        }
+                    }
                     // TODO: Better way of detecting equivalence?
                     translation.patch_jalr(exc_offset, self.base_v, None);
                 }
