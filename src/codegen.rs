@@ -997,29 +997,49 @@ impl<'a> Codegen<'a> {
                 match i_funct3(inst) {
                     0b000 => {
                         // addi
-                        ld_simm16(&mut self.a, 30, imm);
-                        dynasm!(self.a
-                            ; .arch aarch64
-                            ; add X(rd as u32), X(rs as u32), x30
-                        );
+                        if imm as i32 >= 0 {
+                            dynasm!(self.a
+                                ; .arch aarch64
+                                ; add X(rd as u32), X(rs as u32), imm
+                            );
+                        } else {
+                            dynasm!(self.a
+                                ; .arch aarch64
+                                ; sub X(rd as u32), X(rs as u32), (-(imm as i32)) as u32
+                            );
+                        }
                     }
                     0b010 => {
                         // slti
-                        ld_simm16(&mut self.a, 30, imm);
-                        dynasm!(self.a
-                            ; .arch aarch64
-                            ; cmp X(rs as u32), x30
-                            ; cset X(rd as u32), lt
-                        );
+                        if imm as i32 >= 0 {
+                            dynasm!(self.a
+                                ; .arch aarch64
+                                ; cmp X(rs as u32), imm
+                                ; cset X(rd as u32), lt
+                            );
+                        } else {
+                            dynasm!(self.a
+                                ; .arch aarch64
+                                ; cmn X(rs as u32), (-(imm as i32)) as u32
+                                ; cset X(rd as u32), lt
+                            );
+                        }
                     }
                     0b011 => {
                         // sltu
-                        ld_simm16(&mut self.a, 30, imm);
-                        dynasm!(self.a
-                            ; .arch aarch64
-                            ; cmp X(rs as u32), x30
-                            ; cset X(rd as u32), lo
-                        );
+                        if imm as i32 >= 0 {
+                            dynasm!(self.a
+                                ; .arch aarch64
+                                ; cmp X(rs as u32), imm
+                                ; cset X(rd as u32), lo
+                            );
+                        } else {
+                            dynasm!(self.a
+                                ; .arch aarch64
+                                ; cmn X(rs as u32), (-(imm as i32)) as u32
+                                ; cset X(rd as u32), lo
+                            );
+                        }
                     }
                     0b100 => {
                         // xori
@@ -1076,15 +1096,20 @@ impl<'a> Codegen<'a> {
                 match i_funct3(inst) {
                     0b000 => {
                         // addiw
-                        ld_simm16(&mut self.a, 30, imm);
-                        dynasm!(self.a
-                            ; .arch aarch64
-                            ; adds W(rd as u32), W(rs as u32), w30
-                        );
+                        if imm as i32 >= 0 {
+                            dynasm!(self.a
+                                ; .arch aarch64
+                                ; adds W(rd as u32), W(rs as u32), imm
+                            );
+                        } else {
+                            dynasm!(self.a
+                                ; .arch aarch64
+                                ; subs W(rd as u32), W(rs as u32), (-(imm as i32)) as u32
+                            );
+                        }
                     }
                     0b001 => {
                         // slli
-                        ld_simm16(&mut self.a, 30, imm);
                         dynasm!(self.a
                             ; .arch aarch64
                             ; lsl W(rd as u32), W(rs as u32), (imm & 0b11111)
