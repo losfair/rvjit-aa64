@@ -10,6 +10,8 @@ use log::debug;
 static IMAGE: &'static [u8] = include_bytes!("../../playground/play.bin");
 
 fn main() {
+    env_logger::init();
+
     let section_code = Section::new(0x10000, SectionData::new(IMAGE.to_vec(), SectionFlags::R | SectionFlags::X));
     let section_data = Section::new(0x20000, SectionData::new(vec![42u8; 65536], SectionFlags::R | SectionFlags::W));
     let mut rt = Runtime::new();
