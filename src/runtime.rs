@@ -1,5 +1,5 @@
 use crate::config::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use crate::translation::{Translation, VirtualReg, register_map_policy};
 use dynasmrt::AssemblyOffset;
@@ -149,6 +149,8 @@ impl Runtime {
         let target = self.sections.range(..=addr).rev().next();
         match target {
             Some((&k, x)) if x.base_v + (x.data.get().len() as u64) > addr => {
+                let x = x.clone();
+                x.cleanup(self);
                 self.sections.remove(&k);
                 true
             }
@@ -172,10 +174,29 @@ impl Runtime {
     }
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct JitRef {
+    base_v: u64,
+    exc_offset: u32,
+}
+
+impl JitRef {
+    fn invalidate(&self, rt: &mut Runtime) {
+        if let Some(section) = rt.sections.get(&self.base_v) {
+            let mut translation = section.translation.lock().unwrap();
+            if let Some(ref mut t) = *translation {
+                // FIXME: spurious invalidation is possible (ABA problem)
+                t.try_invalidate_load_store(self.exc_offset);
+            }
+        }
+    }
+}
+
 pub struct Section {
-    pub base_v: u64,
-    pub data: SectionData,
-    translation: Box<Mutex<Option<Translation>>>,
+    base_v: u64,
+    data: SectionData,
+    translation: Mutex<Option<Translation>>,
+    jit_refs: Mutex<BTreeSet<JitRef>>,
 }
 
 impl Section {
@@ -183,8 +204,26 @@ impl Section {
         Self {
             base_v,
             data,
-            translation: Box::new(Mutex::new(None)),
+            translation: Mutex::new(None),
+            jit_refs: Mutex::new(BTreeSet::new()),
         }
+    }
+
+    pub fn base_v(&self) -> u64 {
+        self.base_v
+    }
+
+    pub fn get_ro(&self) -> &[u8] {
+        self.data.get()
+    }
+
+    pub fn get_rw(&mut self) -> Option<&mut [u8]> {
+        self.data.get_mut()
+    }
+
+    // no direct set_flags because JIT invalidation is required
+    pub fn get_flags(&self) -> SectionFlags {
+        self.data.get_flags()
     }
 
     fn ensure_translation(&self) -> Result<(), ExecError> {
@@ -198,6 +237,13 @@ impl Section {
         }
 
         Ok(())
+    }
+
+    fn cleanup(&self, rt: &mut Runtime) {
+        let jit_refs = self.jit_refs.lock().unwrap();
+        for r in jit_refs.iter() {
+            r.invalidate(rt);
+        }
     }
 
     fn run(&self, rt: &mut Runtime) -> Result<(), ExecError> {
@@ -286,8 +332,8 @@ impl Section {
                     Some(x) => x,
                     None => return Err(ExecError::BadLoadStoreAddress),
                 };
+                let mut target_jit_refs = target_section.jit_refs.lock().unwrap();
 
-                // TODO: bookkeeping
                 if pp.is_store && !target_section.data.get_flags().contains(SectionFlags::W) {
                     return Err(ExecError::BadLoadStoreFlags);
                 }
@@ -295,6 +341,13 @@ impl Section {
                 if !pp.is_store && !target_section.data.get_flags().contains(SectionFlags::R) {
                     return Err(ExecError::BadLoadStoreFlags);
                 }
+
+                // FIXME: spurious cache invalidation is possible since we aren't deleting the previous
+                // JitRef (if any)
+                target_jit_refs.insert(JitRef {
+                    base_v: self.base_v,
+                    exc_offset,
+                });
 
                 translation.patch_load_store(exc_offset, &target_section);
                 Err(ExecError::Retry)

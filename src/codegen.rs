@@ -286,6 +286,53 @@ impl<'a> Codegen<'a> {
                     _ => self.emit_ud(vpc, inst)
                 }
             }
+            0b0100011 => {
+                // store
+
+                let raw_rs = i_rs(inst) as _;
+                let raw_rt = i_rt(inst) as _;
+                let imm = i_stype_imm(inst);
+
+                match i_funct3(inst) {
+                    0b000 => {
+                        // sb
+                        self.emit_store(vpc, raw_rs, raw_rt, imm, 1, |this, rt, rs| {
+                            dynasm!(this.a
+                                ; .arch aarch64
+                                ; strb W(rt), [X(rs)]
+                            );
+                        });
+                    }
+                    0b001 => {
+                        // sh
+                        self.emit_store(vpc, raw_rs, raw_rt, imm, 2, |this, rt, rs| {
+                            dynasm!(this.a
+                                ; .arch aarch64
+                                ; strh W(rt), [X(rs)]
+                            );
+                        });
+                    }
+                    0b010 => {
+                        // sw
+                        self.emit_store(vpc, raw_rs, raw_rt, imm, 4, |this, rt, rs| {
+                            dynasm!(this.a
+                                ; .arch aarch64
+                                ; str W(rt), [X(rs)]
+                            );
+                        });
+                    }
+                    0b011 => {
+                        // sd
+                        self.emit_store(vpc, raw_rs, raw_rt, imm, 8, |this, rt, rs| {
+                            dynasm!(this.a
+                                ; .arch aarch64
+                                ; str X(rt), [X(rs)]
+                            );
+                        });
+                    }
+                    _ => self.emit_ud(vpc, inst)
+                }
+            }
             _ => self.emit_ud(vpc, inst)
         }
     }
@@ -357,6 +404,75 @@ impl<'a> Codegen<'a> {
         self.spill.release_temp(&mut self.a, t0_h);
         self.spill.release_register_r(&mut self.a, rs_h);
         self.spill.release_register_w(&mut self.a, rd_h);
+    }
+
+    fn emit_store<F: FnOnce(&mut Self, u32, u32)>(&mut self, vpc: u64, raw_rs: u32, raw_rt: u32, imm: u32, access_size: u32, emit_inner: F) {
+        let (rs, rt, rs_h, rt_h) = self.spill.map_register_tuple_r_r(&mut self.a, raw_rs as _, raw_rt as _);
+        let (t0, t0_h) = self.spill.mk_temp(&mut self.a, &[raw_rs as _, raw_rt as _]);
+
+        // Compute effective address
+        ld_simm16(&mut self.a, t0 as _, imm);
+        dynasm!(self.a
+            ; .arch aarch64
+            ; add X(t0 as u32), X(t0 as u32), X(rs as u32)
+        );
+
+        // Upper bound
+        // XXX: Substract load size when patching
+        let pp_upper = self.a.offset().0;
+        ld_imm64(&mut self.a, 30, 0); // PATCH
+        dynasm!(self.a
+            ; .arch aarch64
+            ; cmp X(t0 as u32), x30
+            ; b.hs >fallback
+        );
+
+        // Lower bound
+        let pp_lower = self.a.offset().0;
+        ld_imm64(&mut self.a, 30, std::u64::MAX); // PATCH
+        dynasm!(self.a
+            ; .arch aarch64
+            ; cmp X(t0 as u32), x30
+            ; b.lo >fallback
+        );
+
+        // v_addr + this_offset = real_addr
+        let pp_reloff = self.a.offset().0;
+        ld_imm64(&mut self.a, 30, std::u64::MAX); // PATCH
+        dynasm!(self.a
+            ; .arch aarch64
+            ; add X(t0 as u32), X(t0 as u32), x30
+        );
+
+        emit_inner(self, rt as _, t0 as _);
+
+        dynasm!(self.a
+            ; .arch aarch64
+            ; b >ok
+            ; fallback:
+        );
+
+        self.emit_exception(vpc, error::ERROR_REASON_LOAD_STORE_MISS);
+        let pp = LoadStorePatchPoint {
+            lower_bound_offset: pp_lower as _,
+            upper_bound_offset: pp_upper as _,
+            reloff_offset: pp_reloff as _,
+            rs: raw_rs as u32,
+            rs_offset: imm as i32,
+            access_size: access_size,
+            is_store: true,
+        };
+        let asm_offset = self.a.offset().0;
+        self.load_store_patch_points.insert(asm_offset as u32, pp);
+
+        dynasm!(self.a
+            ; .arch aarch64
+            ; ok:
+        );
+
+        self.spill.release_temp(&mut self.a, t0_h);
+        self.spill.release_register_r(&mut self.a, rs_h);
+        self.spill.release_register_r(&mut self.a, rt_h);
     }
 
     fn emit_jalr(&mut self, vpc: u64, raw_rd: u32, raw_rs: u32, imm: u32) {
@@ -1124,6 +1240,10 @@ fn i_btype_imm(inst: u32) -> u32 {
         | (((inst >> 25) & 0b111111) << 5)
         | (((inst >> 31) & 0b1) << 12)
     )
+}
+
+fn i_stype_imm(inst: u32) -> u32 {
+    sext12b(((inst >> 7) & 0b11111) | (((inst >> 25) & 0b1111111) << 5))
 }
 
 fn i_funct7(inst: u32) -> u32 {

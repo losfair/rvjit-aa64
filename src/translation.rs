@@ -76,9 +76,9 @@ impl Translation {
             None => panic!("Translation::patch_load_store: cannot find patch point"),
         };
 
-        let lower_bound = target_section.base_v;
-        let upper_bound = target_section.base_v + target_section.data.get().len() as u64 - (pp.access_size - 1) as u64;
-        let reloff = (target_section.data.get().as_ptr() as u64).wrapping_sub(target_section.base_v);
+        let lower_bound = target_section.base_v();
+        let upper_bound = target_section.base_v() + target_section.get_ro().len() as u64 - (pp.access_size - 1) as u64;
+        let reloff = (target_section.get_ro().as_ptr() as u64).wrapping_sub(target_section.base_v());
 
         self.backing.alter(|m| {
             m.goto(AssemblyOffset(pp.lower_bound_offset as _));
@@ -89,6 +89,24 @@ impl Translation {
 
             m.goto(AssemblyOffset(pp.reloff_offset as _));
             codegen::ld_imm64(m, 30, reloff);
+        }).unwrap();
+    }
+
+    pub fn try_invalidate_load_store(&mut self, exc_offset: u32) {
+        let pp = match self.get_load_store_patch_point(exc_offset) {
+            Some(x) => x,
+            None => return,
+        };
+
+        self.backing.alter(|m| {
+            m.goto(AssemblyOffset(pp.lower_bound_offset as _));
+            codegen::ld_imm64(m, 30, std::u64::MAX);
+
+            m.goto(AssemblyOffset(pp.upper_bound_offset as _));
+            codegen::ld_imm64(m, 30, 0);
+
+            m.goto(AssemblyOffset(pp.reloff_offset as _));
+            codegen::ld_imm64(m, 30, std::u64::MAX);
         }).unwrap();
     }
 
