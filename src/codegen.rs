@@ -128,7 +128,7 @@ impl<'a> Codegen<'a> {
             0b0111011 => {
                 // arith-r 32-bit
                 let funct3 = i_funct3(inst);
-                if funct3 != 0b000 && funct3 != 0b001 && funct3 != 0b101 {
+                if funct3 == 0b010 || funct3 == 0b011 {
                     self.emit_ud(vpc, inst);
                     return;
                 }
@@ -582,81 +582,213 @@ impl<'a> Codegen<'a> {
             0b0110011 => {
                 match i_funct3(inst) {
                     0b000 => {
-                        // add/sub
-                        if i_funct7(inst) & 0b0100000 == 0 {
-                            // add
-                            dynasm!(self.a
-                                ; .arch aarch64
-                                ; add X(rd as u32), X(rs as u32), X(rt as u32)
-                            );
-                        } else {
-                            // sub
-                            dynasm!(self.a
-                                ; .arch aarch64
-                                ; sub X(rd as u32), X(rs as u32), X(rt as u32)
-                            );
+                        // add/sub/mul
+                        let funct7 = i_funct7(inst);
+                        match funct7 {
+                            0b0100000 => {
+                                // sub
+                                dynasm!(self.a
+                                    ; .arch aarch64
+                                    ; sub X(rd as u32), X(rs as u32), X(rt as u32)
+                                );
+                            }
+                            0b0000001 => {
+                                // mul
+                                dynasm!(self.a
+                                    ; .arch aarch64
+                                    ; mul X(rd as u32), X(rs as u32), X(rt as u32)
+                                );
+                            }
+                            _ => {
+                                // add
+                                if funct7 != 0b0000000 {
+                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting add. vpc = 0x{:016x}", vpc);
+                                }
+                                dynasm!(self.a
+                                    ; .arch aarch64
+                                    ; add X(rd as u32), X(rs as u32), X(rt as u32)
+                                );
+                            }
                         }
                     }
                     0b001 => {
-                        // sll
-                        dynasm!(self.a
-                            ; .arch aarch64
-                            ; lsl X(rd as u32), X(rs as u32), X(rt as u32)
-                        );
+                        // sll/mulh
+                        let funct7 = i_funct7(inst);
+                        match funct7 {
+                            0b0000001 => {
+                                // mulh
+                                dynasm!(self.a
+                                    ; .arch aarch64
+                                    ; smulh X(rd as u32), X(rs as u32), X(rt as u32)
+                                );
+                            }
+                            _ => {
+                                // sll
+                                if funct7 != 0b0000000 {
+                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting sll. vpc = 0x{:016x}", vpc);
+                                }
+                                dynasm!(self.a
+                                    ; .arch aarch64
+                                    ; lsl X(rd as u32), X(rs as u32), X(rt as u32)
+                                );
+                            }
+                        }
                     }
                     0b010 => {
-                        // slt
-                        dynasm!(self.a
-                            ; .arch aarch64
-                            ; cmp X(rs as u32), X(rt as u32)
-                            ; cset X(rd as u32), lt
-                        );
+                        // slt/mulhsu
+                        let funct7 = i_funct7(inst);
+                        match funct7 {
+                            0b0000001 => {
+                                // mulhsu
+                                debug!("emit_rtype: mulhsu not yet implemented. Replacing with mulh. vpc = 0x{:016x}", vpc);
+                                dynasm!(self.a
+                                    ; .arch aarch64
+                                    ; smulh X(rd as u32), X(rs as u32), X(rt as u32)
+                                );
+                            }
+                            _ => {
+                                // slt
+                                if funct7 != 0b0000000 {
+                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting slt. vpc = 0x{:016x}", vpc);
+                                }
+                                dynasm!(self.a
+                                    ; .arch aarch64
+                                    ; cmp X(rs as u32), X(rt as u32)
+                                    ; cset X(rd as u32), lt
+                                );
+                            }
+                        }
                     }
                     0b011 => {
-                        // sltu
-                        dynasm!(self.a
-                            ; .arch aarch64
-                            ; cmp X(rs as u32), X(rt as u32)
-                            ; cset X(rd as u32), lo
-                        );
+                        // sltu/mulhu
+
+                        let funct7 = i_funct7(inst);
+                        match funct7 {
+                            0b0000001 => {
+                                // mulhu
+                                dynasm!(self.a
+                                    ; .arch aarch64
+                                    ; umulh X(rd as u32), X(rs as u32), X(rt as u32)
+                                );
+                            }
+                            _ => {
+                                // sltu
+                                if funct7 != 0b0000000 {
+                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting sltu. vpc = 0x{:016x}", vpc);
+                                }
+                                dynasm!(self.a
+                                    ; .arch aarch64
+                                    ; cmp X(rs as u32), X(rt as u32)
+                                    ; cset X(rd as u32), lo
+                                );
+                            }
+                        }
                     }
                     0b100 => {
-                        // xor
-                        dynasm!(self.a
-                            ; .arch aarch64
-                            ; eor X(rd as u32), X(rs as u32), X(rt as u32)
-                        );
+                        // xor/div
+
+                        let funct7 = i_funct7(inst);
+                        match funct7 {
+                            0b0000001 => {
+                                // div
+                                dynasm!(self.a
+                                    ; .arch aarch64
+                                    ; sdiv X(rd as u32), X(rs as u32), X(rt as u32)
+                                );
+                            }
+                            _ => {
+                                // xor
+                                if funct7 != 0b0000000 {
+                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting xor. vpc = 0x{:016x}", vpc);
+                                }
+                                dynasm!(self.a
+                                    ; .arch aarch64
+                                    ; eor X(rd as u32), X(rs as u32), X(rt as u32)
+                                );
+                            }
+                        }
                     }
                     0b101 => {
-                        // srl/sra
+                        // srl/sra/divu
                         // TODO: Check behavior when shifting by more than 32 bits
-                        if i_funct7(inst) & 0b0100000 == 0 {
-                            // srl
-                            dynasm!(self.a
-                                ; .arch aarch64
-                                ; lsr X(rd as u32), X(rs as u32), X(rt as u32)
-                            );
-                        } else {
-                            // sra
-                            dynasm!(self.a
-                                ; .arch aarch64
-                                ; asr X(rd as u32), X(rs as u32), X(rt as u32)
-                            );
+
+                        let funct7 = i_funct7(inst);
+                        match funct7 {
+                            0b0000001 => {
+                                // divu
+                                dynasm!(self.a
+                                    ; .arch aarch64
+                                    ; sdiv X(rd as u32), X(rs as u32), X(rt as u32)
+                                );
+                            }
+                            0b0100000 => {
+                                // sra
+                                dynasm!(self.a
+                                    ; .arch aarch64
+                                    ; asr X(rd as u32), X(rs as u32), X(rt as u32)
+                                );
+                            }
+                            _ => {
+                                // srl
+                                if funct7 != 0b0000000 {
+                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting srl. vpc = 0x{:016x}", vpc);
+                                }
+                                dynasm!(self.a
+                                    ; .arch aarch64
+                                    ; lsr X(rd as u32), X(rs as u32), X(rt as u32)
+                                );
+                            }
                         }
                     }
                     0b110 => {
-                        // or
-                        dynasm!(self.a
-                            ; .arch aarch64
-                            ; orr X(rd as u32), X(rs as u32), X(rt as u32)
-                        );
+                        // or/rem
+
+                        let funct7 = i_funct7(inst);
+                        match funct7 {
+                            0b0000001 => {
+                                // rem
+                                dynasm!(self.a
+                                    ; .arch aarch64
+                                    ; sdiv X(rd as u32), X(rs as u32), X(rt as u32)
+                                    ; msub X(rd as u32), X(rd as u32), X(rt as u32), X(rs as u32)
+                                );
+                            }
+                            _ => {
+                                // or
+                                if funct7 != 0b0000000 {
+                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting or. vpc = 0x{:016x}", vpc);
+                                }
+                                dynasm!(self.a
+                                    ; .arch aarch64
+                                    ; orr X(rd as u32), X(rs as u32), X(rt as u32)
+                                );
+                            }
+                        }
                     }
                     0b111 => {
-                        // and
-                        dynasm!(self.a
-                            ; .arch aarch64
-                            ; and X(rd as u32), X(rs as u32), X(rt as u32)
-                        );
+                        // and/remu
+
+                        let funct7 = i_funct7(inst);
+                        match funct7 {
+                            0b0000001 => {
+                                // remu
+                                dynasm!(self.a
+                                    ; .arch aarch64
+                                    ; udiv X(rd as u32), X(rs as u32), X(rt as u32)
+                                    ; msub X(rd as u32), X(rd as u32), X(rt as u32), X(rs as u32)
+                                );
+                            }
+                            _ => {
+                                // and
+                                if funct7 != 0b0000000 {
+                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting and. vpc = 0x{:016x}", vpc);
+                                }
+                                dynasm!(self.a
+                                    ; .arch aarch64
+                                    ; and X(rd as u32), X(rs as u32), X(rt as u32)
+                                );
+                            }
+                        }
                     }
                     _ => unreachable!()
                 }
@@ -664,46 +796,133 @@ impl<'a> Codegen<'a> {
             0b0111011 => {
                 match i_funct3(inst) {
                     0b000 => {
-                        // addw/subw
-                        if i_funct7(inst) & 0b0100000 == 0 {
-                            // addw
-                            dynasm!(self.a
-                                ; .arch aarch64
-                                ; adds W(rd as u32), W(rs as u32), W(rt as u32)
-                            );
-                        } else {
-                            // subw
-                            dynasm!(self.a
-                                ; .arch aarch64
-                                ; subs W(rd as u32), W(rs as u32), W(rt as u32)
-                            );
+                        let funct7 = i_funct7(inst);
+                        match funct7 {
+                            0b0100000 => {
+                                // subw
+                                dynasm!(self.a
+                                    ; .arch aarch64
+                                    ; subs W(rd as u32), W(rs as u32), W(rt as u32)
+                                );
+                            }
+                            0b0000001 => {
+                                // mulw
+                                dynasm!(self.a
+                                    ; .arch aarch64
+                                    ; mul W(rd as u32), W(rs as u32), W(rt as u32)
+                                    ; sxtw X(rd as u32), W(rd as u32)
+                                );
+                            }
+                            _ => {
+                                // addw
+                                if funct7 != 0b0000000 {
+                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting addw. vpc = 0x{:016x}", vpc);
+                                }
+                                dynasm!(self.a
+                                    ; .arch aarch64
+                                    ; adds W(rd as u32), W(rs as u32), W(rt as u32)
+                                );
+                            }
                         }
                     }
                     0b001 => {
-                        // sll
-                        dynasm!(self.a
-                            ; .arch aarch64
-                            ; lsl W(rd as u32), W(rs as u32), W(rt as u32)
-                            ; sxtw X(rd as u32), W(rd as u32)
-                        );
+                        let funct7 = i_funct7(inst);
+                        match funct7 {
+                            _ => {
+                                // sllw
+                                if funct7 != 0b0000000 {
+                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting sllw. vpc = 0x{:016x}", vpc);
+                                }
+                                dynasm!(self.a
+                                    ; .arch aarch64
+                                    ; lsl W(rd as u32), W(rs as u32), W(rt as u32)
+                                    ; sxtw X(rd as u32), W(rd as u32)
+                                );
+                            }
+                        }
+                    }
+                    0b100 => {
+                        let funct7 = i_funct7(inst);
+                        match funct7 {
+                            _ => {
+                                // divw
+                                if funct7 != 0b0000001 {
+                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting divw. vpc = 0x{:016x}", vpc);
+                                }
+                                dynasm!(self.a
+                                    ; .arch aarch64
+                                    ; sdiv W(rd as u32), W(rs as u32), W(rt as u32)
+                                    ; sxtw X(rd as u32), W(rd as u32)
+                                );
+                            }
+                        }
                     }
                     0b101 => {
-                        // srl/sra
                         // TODO: Check behavior when shifting by more than 32 bits
-                        if i_funct7(inst) & 0b0100000 == 0 {
-                            // srl
-                            dynasm!(self.a
-                                ; .arch aarch64
-                                ; lsr W(rd as u32), W(rs as u32), W(rt as u32)
-                                ; sxtw X(rd as u32), W(rd as u32)
-                            );
-                        } else {
-                            // sra
-                            dynasm!(self.a
-                                ; .arch aarch64
-                                ; asr W(rd as u32), W(rs as u32), W(rt as u32)
-                                ; sxtw X(rd as u32), W(rd as u32)
-                            );
+
+                        let funct7 = i_funct7(inst);
+                        match funct7 {
+                            0b0100000 => {
+                                // sraw
+                                dynasm!(self.a
+                                    ; .arch aarch64
+                                    ; asr W(rd as u32), W(rs as u32), W(rt as u32)
+                                    ; sxtw X(rd as u32), W(rd as u32)
+                                );
+                            }
+                            0b0000001 => {
+                                // divuw
+                                dynasm!(self.a
+                                    ; .arch aarch64
+                                    ; udiv W(rd as u32), W(rs as u32), W(rt as u32)
+                                    ; sxtw X(rd as u32), W(rd as u32)
+                                );
+                            }
+                            _ => {
+                                // srlw
+                                if funct7 != 0b0000000 {
+                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting srlw. vpc = 0x{:016x}", vpc);
+                                }
+                                dynasm!(self.a
+                                    ; .arch aarch64
+                                    ; lsr W(rd as u32), W(rs as u32), W(rt as u32)
+                                    ; sxtw X(rd as u32), W(rd as u32)
+                                );
+                            }
+                        }
+                    }
+                    0b110 => {
+                        let funct7 = i_funct7(inst);
+                        match funct7 {
+                            _ => {
+                                // remw
+                                if funct7 != 0b0000001 {
+                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting remw. vpc = 0x{:016x}", vpc);
+                                }
+                                dynasm!(self.a
+                                    ; .arch aarch64
+                                    ; sdiv W(rd as u32), W(rs as u32), W(rt as u32)
+                                    ; msub W(rd as u32), W(rd as u32), W(rt as u32), W(rs as u32)
+                                    ; sxtw X(rd as u32), W(rd as u32)
+                                );
+                            }
+                        }
+                    }
+                    0b111 => {
+                        let funct7 = i_funct7(inst);
+                        match funct7 {
+                            _ => {
+                                // remuw
+                                if funct7 != 0b0000001 {
+                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting remuw. vpc = 0x{:016x}", vpc);
+                                }
+                                dynasm!(self.a
+                                    ; .arch aarch64
+                                    ; udiv W(rd as u32), W(rs as u32), W(rt as u32)
+                                    ; msub W(rd as u32), W(rd as u32), W(rt as u32), W(rs as u32)
+                                    ; sxtw X(rd as u32), W(rd as u32)
+                                );
+                            }
                         }
                     }
                     _ => unreachable!()
