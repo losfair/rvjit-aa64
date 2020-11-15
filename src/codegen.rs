@@ -49,11 +49,16 @@ impl<'a> Codegen<'a> {
         while let Ok(x) = cursor.read_u32::<LittleEndian>() {
             let inst_offset = ((vpc - self.base_vpc) / 2) as usize;
             let label = self.relative_br_labels[inst_offset];
+
+            // FIXME: We are not handling C extension. This is a hack to prevent missing-dynamic-label runtime errors.
+            let next_label = self.relative_br_labels[inst_offset + 1];
+
             self.v_offset_to_translation_offset[inst_offset] = self.a.offset().0 as u32;
 
             dynasm!(self.a
                 ; .arch aarch64
                 ; =>label
+                ; =>next_label
             );
             self.emit_once(vpc, x);
             vpc += 4;
@@ -808,7 +813,8 @@ impl<'a> Codegen<'a> {
                                 // subw
                                 dynasm!(self.a
                                     ; .arch aarch64
-                                    ; subs W(rd as u32), W(rs as u32), W(rt as u32)
+                                    ; sub W(rd as u32), W(rs as u32), W(rt as u32)
+                                    ; sxtw X(rd as u32), W(rd as u32)
                                 );
                             }
                             0b0000001 => {
@@ -826,7 +832,8 @@ impl<'a> Codegen<'a> {
                                 }
                                 dynasm!(self.a
                                     ; .arch aarch64
-                                    ; adds W(rd as u32), W(rs as u32), W(rt as u32)
+                                    ; add W(rd as u32), W(rs as u32), W(rt as u32)
+                                    ; sxtw X(rd as u32), W(rd as u32)
                                 );
                             }
                         }
@@ -1101,12 +1108,14 @@ impl<'a> Codegen<'a> {
                         if imm as i32 >= 0 {
                             dynasm!(self.a
                                 ; .arch aarch64
-                                ; adds W(rd as u32), W(rs as u32), imm
+                                ; add W(rd as u32), W(rs as u32), imm
+                                ; sxtw X(rd as u32), W(rd as u32)
                             );
                         } else {
                             dynasm!(self.a
                                 ; .arch aarch64
-                                ; subs W(rd as u32), W(rs as u32), (-(imm as i32)) as u32
+                                ; sub W(rd as u32), W(rs as u32), (-(imm as i32)) as u32
+                                ; sxtw X(rd as u32), W(rd as u32)
                             );
                         }
                     }
