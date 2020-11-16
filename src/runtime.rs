@@ -107,6 +107,16 @@ impl Runtime {
         }
     }
 
+    pub fn get_memory_max(&self, start: u64) -> Result<&[u8], ExecError> {
+        let section = if let Some(x) = self.lookup_section_ref(start) {
+            x
+        } else {
+            return Err(ExecError::BadMemDerefAddr)
+        };
+        let m = &section.get_ro()[(start - section.base_v) as usize..];
+        Ok(m)
+    }
+
     pub fn get_memory(&self, start: u64, len: usize) -> Result<&[u8], ExecError> {
         let section = if let Some(x) = self.lookup_section_ref(start) {
             x
@@ -120,7 +130,8 @@ impl Runtime {
         Ok(&m[..len])
     }
 
-    pub fn get_memory_mut(&self, start: u64, len: usize) -> Result<&mut [u8], ExecError> {
+    pub fn get_memory_mut(&mut self, start: u64, len: usize) -> Result<&mut [u8], ExecError> {
+        // TODO: Make `Section` private so we can safely do r/w dereferences.
         let section = if let Some(x) = self.lookup_section_ref(start) {
             x
         } else {
