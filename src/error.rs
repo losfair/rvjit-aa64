@@ -34,6 +34,12 @@ pub enum ExecError {
 
     #[error("retry")]
     Retry,
+
+    #[error("bad memory dereference address")]
+    BadMemDerefAddr,
+
+    #[error("bad memory dereference flags")]
+    BadMemDerefFlags,
 }
 
 pub(crate) const ERROR_REASON_UNDEFINED_INSTRUCTION: u16 = 1;

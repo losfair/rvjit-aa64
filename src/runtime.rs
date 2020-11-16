@@ -107,14 +107,49 @@ impl Runtime {
         }
     }
 
-    pub fn lookup_section(&self, addr: u64) -> Option<Arc<Section>> {
+    pub fn get_memory(&self, start: u64, len: usize) -> Result<&[u8], ExecError> {
+        let section = if let Some(x) = self.lookup_section_ref(start) {
+            x
+        } else {
+            return Err(ExecError::BadMemDerefAddr)
+        };
+        let m = &section.get_ro()[(start - section.base_v) as usize..];
+        if m.len() < len {
+            return Err(ExecError::BadMemDerefAddr);
+        }
+        Ok(&m[..len])
+    }
+
+    pub fn get_memory_mut(&self, start: u64, len: usize) -> Result<&mut [u8], ExecError> {
+        let section = if let Some(x) = self.lookup_section_ref(start) {
+            x
+        } else {
+            return Err(ExecError::BadMemDerefAddr);
+        };
+        let rw = if let Some(x) = section.get_rw() {
+            x
+        } else {
+            return Err(ExecError::BadMemDerefFlags);
+        };
+        let m = &mut rw[(start - section.base_v) as usize..];
+        if m.len() < len {
+            return Err(ExecError::BadMemDerefAddr);
+        }
+        Ok(&mut m[..len])
+    }
+
+    pub fn lookup_section_ref(&self, addr: u64) -> Option<&Arc<Section>> {
         let target = self.sections.range(..=addr).rev().next();
         match target {
             Some((_, x)) if x.base_v + (x.data.get().len() as u64) > addr => {
-                Some(x.clone())
+                Some(x)
             }
             _ => None
         }
+    }
+
+    pub fn lookup_section(&self, addr: u64) -> Option<Arc<Section>> {
+        self.lookup_section_ref(addr).cloned()
     }
 
     pub fn add_section(&mut self, section: Arc<Section>) -> bool {
@@ -220,7 +255,7 @@ impl Section {
         self.data.get()
     }
 
-    pub fn get_rw(&mut self) -> Option<&mut [u8]> {
+    pub fn get_rw(&self) -> Option<&mut [u8]> {
         self.data.get_mut()
     }
 

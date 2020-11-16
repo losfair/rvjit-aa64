@@ -57,7 +57,7 @@ impl SectionData {
         }
     }
 
-    pub fn get_mut(&mut self) -> Option<&mut [u8]> {
+    pub fn get_mut(&self) -> Option<&mut [u8]> {
         if self.flags.contains(SectionFlags::W) {
             Some(unsafe {
                 &mut *self.backing.0.get()
