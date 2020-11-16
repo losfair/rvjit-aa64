@@ -102,6 +102,7 @@ impl<'a> Codegen<'a> {
     }
 
     pub fn refine(self) -> Translation {
+        debug!("refine: code size = {} bytes. #(offsets) = {}", self.a.offset().0, self.v_offset_to_translation_offset.len());
         Translation {
             backing: self.a,
             v_offset_to_translation_offset: self.v_offset_to_translation_offset,
@@ -1178,7 +1179,7 @@ impl<'a> Codegen<'a> {
     }
 
     fn emit_exception(&mut self, vpc: u64, reason: u16) {
-        debug!("static exception @ 0x{:016x}: reason {}", vpc, reason);
+        //debug!("static exception @ 0x{:016x}: reason {}", vpc, reason);
 
         ld_simm16(&mut self.a, trash_reg_w() as _, reason as u32);
 
