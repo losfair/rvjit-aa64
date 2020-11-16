@@ -46,6 +46,9 @@ pub fn load(rt: &mut Runtime, image: &[u8]) -> Result<()> {
         }
     }
 
+    let entry = file.header.pt2.entry_point();
+    rt.vpc = entry;
+
     Ok(())
 }
 

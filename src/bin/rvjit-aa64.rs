@@ -28,7 +28,6 @@ fn main() {
 
     let mut host = Host::new();
 
-    rt.vpc = 0x10000;
     loop {
         let e = rt.run().unwrap_err();
         match e {
