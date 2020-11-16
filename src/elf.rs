@@ -31,8 +31,15 @@ pub fn load(rt: &mut Runtime, image: &[u8]) -> Result<()> {
                     SegmentData::Undefined(data) => {
                         let flags = convert_flags(flags)?;
                         debug!("loading data of length {} at vaddr 0x{:016x}. flags = {:?}", data.len(), vaddr, flags);
+                        let mut data = data.to_vec();
+
+                        // FIXME: DoS possible
+                        if data.len() < segment.mem_size() as usize {
+                            data.resize(segment.mem_size() as usize, 0);
+                        }
+
                         let section = Section::new(vaddr, SectionData::new(
-                            data.to_vec(),
+                            data,
                             flags,
                         ));
                         if !rt.add_section(Arc::new(section)) {
