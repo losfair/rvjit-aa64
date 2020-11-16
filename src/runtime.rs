@@ -8,6 +8,7 @@ use crate::error::{self, ExecError};
 use bit_field::BitField;
 use crate::section::{SectionData, SectionFlags};
 use log::debug;
+use std::time::SystemTime;
 
 #[repr(C)]
 pub struct Runtime {
@@ -370,7 +371,10 @@ impl Section {
                         }
                     }
                     // TODO: Better way of detecting equivalence?
+                    let start_time = SystemTime::now();
                     translation.patch_jalr(exc_offset, self.base_v, None);
+                    let end_time = SystemTime::now();
+                    debug!("patch_jalr duration: {:?}", end_time.duration_since(start_time));
                 }
 
                 let link_vpc = rt.vpc + 4;
@@ -405,7 +409,10 @@ impl Section {
                     exc_offset,
                 });
 
+                let start_time = SystemTime::now();
                 translation.patch_load_store(exc_offset, &target_section);
+                let end_time = SystemTime::now();
+                debug!("patch_load_store duration: {:?}", end_time.duration_since(start_time));
                 Err(ExecError::Retry)
             }
             error::ERROR_REASON_ECALL => {
