@@ -8,3 +8,4 @@ pub mod error;
 pub mod entry_exit;
 pub mod section;
 pub mod elf;
+pub mod rvc;

@@ -76,8 +76,14 @@ impl<'a> Codegen<'a> {
                     ; =>label
                 );
 
-                let inst = x;
-                self.emit_once_c(vpc, inst);
+                match crate::rvc::decompress(x) {
+                    Some(inst) => {
+                        self.emit_once(vpc, inst);
+                    }
+                    None => {
+                        self.emit_ud(vpc);
+                    }
+                }
 
                 vpc += 2;
             }
@@ -121,10 +127,6 @@ impl<'a> Codegen<'a> {
 
         let label = self.relative_br_labels[dst_offset as usize].clone();
         Some(label)
-    }
-
-    fn emit_once_c(&mut self, vpc: u64, inst: u16) {
-        self.emit_ud(vpc);
     }
 
     fn emit_once(&mut self, vpc: u64, inst: u32) {
