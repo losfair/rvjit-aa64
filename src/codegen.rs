@@ -46,22 +46,41 @@ impl<'a> Codegen<'a> {
         let mut vpc = self.base_vpc;
 
         let mut acc_size: usize = 0;
-        while let Ok(x) = cursor.read_u32::<LittleEndian>() {
+        while let Ok(x) = cursor.read_u16::<LittleEndian>() {
             let inst_offset = ((vpc - self.base_vpc) / 2) as usize;
             let label = self.relative_br_labels[inst_offset];
 
-            // FIXME: We are not handling C extension. This is a hack to prevent missing-dynamic-label runtime errors.
-            let next_label = self.relative_br_labels[inst_offset + 1];
-
             self.v_offset_to_translation_offset[inst_offset] = self.a.offset().0 as u32;
 
-            dynasm!(self.a
-                ; .arch aarch64
-                ; =>label
-                ; =>next_label
-            );
-            self.emit_once(vpc, x);
-            vpc += 4;
+            if x & 0b11 == 0b11 {
+                // 4-byte instructions
+                let next_label = self.relative_br_labels[inst_offset + 1];
+                dynasm!(self.a
+                    ; .arch aarch64
+                    ; =>label
+                    ; =>next_label
+                );
+
+                if let Ok(y) = cursor.read_u16::<LittleEndian>() {
+                    let inst = ((y as u32) << 16) | (x as u32);
+                    self.emit_once(vpc, inst);
+                } else {
+                    self.emit_ud(vpc);
+                }
+
+                vpc += 4;
+            } else {
+                // 2-byte instructions
+                dynasm!(self.a
+                    ; .arch aarch64
+                    ; =>label
+                );
+
+                let inst = x;
+                self.emit_once_c(vpc, inst);
+
+                vpc += 2;
+            }
 
             let asm_offset = self.a.offset().0;
 
@@ -104,6 +123,10 @@ impl<'a> Codegen<'a> {
         Some(label)
     }
 
+    fn emit_once_c(&mut self, vpc: u64, inst: u16) {
+        self.emit_ud(vpc);
+    }
+
     fn emit_once(&mut self, vpc: u64, inst: u32) {
         match i_op(inst) {
             0b0010011 => {
@@ -130,7 +153,7 @@ impl<'a> Codegen<'a> {
                 // arith-i 32-bit
                 let funct3 = i_funct3(inst);
                 if funct3 != 0b000 && funct3 != 0b001 && funct3 != 0b101 {
-                    self.emit_ud(vpc, inst);
+                    self.emit_ud(vpc);
                     return;
                 }
 
@@ -146,7 +169,7 @@ impl<'a> Codegen<'a> {
                 // arith-r 32-bit
                 let funct3 = i_funct3(inst);
                 if funct3 == 0b010 || funct3 == 0b011 {
-                    self.emit_ud(vpc, inst);
+                    self.emit_ud(vpc);
                     return;
                 }
 
@@ -164,7 +187,7 @@ impl<'a> Codegen<'a> {
                 let imm = i_btype_imm(inst);
 
                 if funct3 == 0b010 || funct3 == 0b011 {
-                    self.emit_ud(vpc, inst);
+                    self.emit_ud(vpc);
                 } else {
                     let label = match self.prepare_rel_br(vpc, imm as i32) {
                         Some(x) => x,
@@ -301,7 +324,7 @@ impl<'a> Codegen<'a> {
                             );
                         });
                     }
-                    _ => self.emit_ud(vpc, inst)
+                    _ => self.emit_ud(vpc)
                 }
             }
             0b0100011 => {
@@ -348,7 +371,7 @@ impl<'a> Codegen<'a> {
                             );
                         });
                     }
-                    _ => self.emit_ud(vpc, inst)
+                    _ => self.emit_ud(vpc)
                 }
             }
             0b1110011 => {
@@ -362,7 +385,7 @@ impl<'a> Codegen<'a> {
                     self.emit_exception(vpc, error::ERROR_REASON_EBREAK);
                 }
             }
-            _ => self.emit_ud(vpc, inst)
+            _ => self.emit_ud(vpc)
         }
     }
 
@@ -1184,7 +1207,7 @@ impl<'a> Codegen<'a> {
         );
     }
 
-    fn emit_ud(&mut self, vpc: u64, _inst: u32) {
+    fn emit_ud(&mut self, vpc: u64) {
         self.emit_exception(vpc, error::ERROR_REASON_UNDEFINED_INSTRUCTION);
     }
 }
