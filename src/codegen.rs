@@ -553,20 +553,12 @@ impl<'a> Codegen<'a> {
 
     fn emit_jalr(&mut self, voff: u32, raw_rd: u32, raw_rs: u32, imm: u32) {
         let (rd, rs, rd_h, rs_h) = self.spill.map_register_tuple_w_r(&mut self.a, raw_rd as _, raw_rs as _);
-        
-        // XXX: rd == trash_reg_w() is possible so we need to prevent overwrite here
-        if raw_rd != 0 {
-            self.load_vpc(voff + 4, rd as _, 30);
-        }
 
         ld_simm16(&mut self.a, 30, imm);
         dynasm!(self.a
             ; .arch aarch64
             ; add X(trash_reg_w() as u32), x30, X(rs as u32)
         );
-
-        self.spill.release_register_r(&mut self.a, rs_h);
-        self.spill.release_register_w(&mut self.a, rd_h);
 
         let lower_bound_slot = self.alloc_rtslot(std::u64::MAX);
         let upper_bound_slot = self.alloc_rtslot(0);
@@ -604,7 +596,7 @@ impl<'a> Codegen<'a> {
 
             // Compute actual address by base + offset
             ; add x30, X(trash_reg_w() as u32), X(temp1_reg())
-            ; br x30
+            ; b >ok
 
             ; fallback:
         );
@@ -621,6 +613,32 @@ impl<'a> Codegen<'a> {
         self.emit_exception(voff, error::ERROR_REASON_JALR_MISS);
         let asm_offset = self.a.offset().0;
         self.jalr_patch_points.insert(asm_offset as u32, pp);
+
+        dynasm!(self.a
+            ; .arch aarch64
+            ; ok:
+        );
+
+        // XXX:
+        //
+        // Loading link pc earlier right after reading `rs` doesn't work because the Rust side depends on the
+        // previous `rs` value to detemine the jump target, and when `rs == rd`, `rs` is overwritten before falling
+        // back to Rust.
+        //
+        // I spent an afternoon finding this bug. Be careful with the Rust side too :|
+        //
+        // The current solution isn't optimal though, since there is one unconditional branch.
+        //
+        // Still need to find a fix.
+        self.load_vpc(voff + 4, rd as _, temp1_reg());
+
+        self.spill.release_register_r(&mut self.a, rs_h);
+        self.spill.release_register_w(&mut self.a, rd_h);
+
+        dynasm!(self.a
+            ; .arch aarch64
+            ; br x30
+        );
     }
 
     fn emit_rtype(&mut self, voff: u32, inst: u32, rd: usize, rs: usize, rt: usize) {
