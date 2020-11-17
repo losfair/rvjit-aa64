@@ -17,6 +17,15 @@ pub struct TranslationCacheConfig {
     pub ttl: Duration,
 }
 
+impl Default for TranslationCacheConfig {
+    fn default() -> Self {
+        TranslationCacheConfig {
+            size: 50,
+            ttl: Duration::from_secs(600),
+        }
+    }
+}
+
 impl TranslationCache {
     pub fn new(config: TranslationCacheConfig) -> TranslationCache {
         TranslationCache {

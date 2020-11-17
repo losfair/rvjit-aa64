@@ -1,10 +1,11 @@
-use crate::runtime::{Runtime, Section};
+use crate::runtime::{Runtime};
 use crate::section::{SectionData, SectionFlags};
 use anyhow::Result;
 use xmas_elf::{sections::ShType, ElfFile, program::{Type, Flags, SegmentData}};
 use std::sync::Arc;
 use thiserror::Error;
 use log::debug;
+use crate::tcache::TranslationCache;
 
 #[derive(Error, Debug)]
 pub enum LoadError {
@@ -22,7 +23,9 @@ pub enum LoadError {
 }
 
 /// Load ELF in section mode
-pub fn load_sections(rt: &mut Runtime, image: &[u8]) -> Result<()> {
+pub fn load_sections(rt: &mut Runtime, c: &TranslationCache, image: &[u8]) -> Result<()> {
+    let mrt = rt.mt();
+    let mut registry = mrt.write_section_registry();
     let file = ElfFile::new(image).map_err(LoadError::Backend)?;
     for sec in file.section_iter() {
         let flags = sec.flags();
@@ -75,15 +78,16 @@ pub fn load_sections(rt: &mut Runtime, image: &[u8]) -> Result<()> {
                 }
             };
 
-            let section = Section::new(vaddr, SectionData::new(
+            let section = SectionData::new(
                 data,
+                c,
                 target_flags,
-            )?);
-            if !rt.add_section(Arc::new(section)) {
-                return Err(LoadError::SectionRejected.into());
-            }
+            )?;
+            registry.add_section(vaddr, section)?;
         }
     }
+
+    drop(registry);
 
     let entry = file.header.pt2.entry_point();
     rt.vpc = entry;
@@ -92,7 +96,9 @@ pub fn load_sections(rt: &mut Runtime, image: &[u8]) -> Result<()> {
 }
 
 /// Load ELF in segment mode
-pub fn load(rt: &mut Runtime, image: &[u8]) -> Result<()> {
+pub fn load(rt: &mut Runtime, c: &TranslationCache, image: &[u8]) -> Result<()> {
+    let mrt = rt.mt();
+    let mut registry = mrt.write_section_registry();
     let file = ElfFile::new(image).map_err(LoadError::Backend)?;
     for segment in file.program_iter() {
         match segment.get_type().map_err(LoadError::Backend)? {
@@ -112,13 +118,12 @@ pub fn load(rt: &mut Runtime, image: &[u8]) -> Result<()> {
                             data.resize(segment.mem_size() as usize, 0);
                         }
 
-                        let section = Section::new(vaddr, SectionData::new(
+                        let section = SectionData::new(
                             data,
+                            c,
                             flags,
-                        )?);
-                        if !rt.add_section(Arc::new(section)) {
-                            return Err(LoadError::SectionRejected.into());
-                        }
+                        )?;
+                        registry.add_section(vaddr, section)?;
                     }
                     _ => {}
                 }
@@ -126,6 +131,8 @@ pub fn load(rt: &mut Runtime, image: &[u8]) -> Result<()> {
             _ => {}
         }
     }
+
+    drop(registry);
 
     let entry = file.header.pt2.entry_point();
     rt.vpc = entry;

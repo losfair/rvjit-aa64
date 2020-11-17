@@ -1,8 +1,7 @@
-use dynasmrt::{AssemblyOffset, aarch64::Assembler};
+use dynasmrt::{AssemblyOffset, ExecutableBuffer};
 use crate::codegen::{self, Codegen};
 use std::collections::BTreeMap;
 use crate::error::ExecError;
-use crate::runtime::Section;
 
 pub struct Translation {
     pub v_offset_to_translation_offset: Box<[u32]>,
@@ -10,7 +9,7 @@ pub struct Translation {
     pub jalr_patch_points: BTreeMap<u32, JalrPatchPoint>,
     pub load_store_patch_points: BTreeMap<u32, LoadStorePatchPoint>,
     pub rtstore_template: Box<[u64]>,
-    pub backing: Assembler,
+    pub backing: ExecutableBuffer,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -74,22 +73,29 @@ impl Translation {
         self.load_store_patch_points.get(&exc_offset).cloned()
     }
 
-    pub fn patch_load_store(&mut self, exc_offset: u32, rtstore: &mut [u64], target_section: &Section) {
+    pub fn patch_load_store(
+        &self, 
+        exc_offset: u32,
+        rtstore: &mut [u64],
+        target_base_v: u64,
+        target_base_real: u64,
+        target_len: u64,
+    ) {
         let pp = match self.get_load_store_patch_point(exc_offset) {
             Some(x) => x,
             None => panic!("Translation::patch_load_store: cannot find patch point"),
         };
 
-        let lower_bound = target_section.base_v();
-        let upper_bound = target_section.base_v() + target_section.get_ro().len() as u64 - (pp.access_size - 1) as u64;
-        let reloff = (target_section.get_ro().as_ptr() as u64).wrapping_sub(target_section.base_v());
+        let lower_bound = target_base_v;
+        let upper_bound = target_base_v + target_len - (pp.access_size - 1) as u64;
+        let reloff = target_base_real.wrapping_sub(target_base_v);
 
         rtstore[pp.lower_bound_slot.0 as usize] = lower_bound;
         rtstore[pp.upper_bound_slot.0 as usize] = upper_bound;
         rtstore[pp.reloff_slot.0 as usize] = reloff;
     }
 
-    pub fn try_invalidate_load_store(&mut self, exc_offset: u32, rtstore: &mut [u64]) {
+    pub fn try_invalidate_load_store(&self, exc_offset: u32, rtstore: &mut [u64]) {
         let pp = match self.get_load_store_patch_point(exc_offset) {
             Some(x) => x,
             None => return,
@@ -100,7 +106,7 @@ impl Translation {
         rtstore[pp.reloff_slot.0 as usize] = std::u64::MAX;
     }
 
-    pub fn patch_jalr(&mut self, exc_offset: u32, rtstore: &mut [u64], target_base_v: u64, target: Option<&Translation>) {
+    pub fn patch_jalr(&self, exc_offset: u32, rtstore: &mut [u64], target_base_v: u64, target: Option<&Translation>) {
         let pp = match self.get_jalr_patch_point(exc_offset) {
             Some(x) => x,
             None => panic!("Translation::patch_jalr: cannot find patch point"),
@@ -115,7 +121,7 @@ impl Translation {
         let lower_bound = target_base_v;
         let upper_bound = target_base_v + ((target.v_offset_to_translation_offset.len() * 2) as u64);
         let v2real_table = target.v_offset_to_translation_offset.as_ptr() as u64;
-        let machine_base = target.backing.reader().lock().ptr(AssemblyOffset(0)) as u64;
+        let machine_base = target.backing.ptr(AssemblyOffset(0)) as u64;
         
         rtstore[pp.lower_bound_slot.0 as usize] = lower_bound;
         rtstore[pp.upper_bound_slot.0 as usize] = upper_bound;

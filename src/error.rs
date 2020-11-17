@@ -14,6 +14,12 @@ pub enum ExecError {
     #[error("undefined instruction")]
     UndefinedInstruction,
 
+    #[error("bad section")]
+    BadSection,
+
+    #[error("bad thread")]
+    BadThread,
+
     #[error("branch out of bounds")]
     BranchOob,
 

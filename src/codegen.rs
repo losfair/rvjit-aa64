@@ -102,13 +102,12 @@ impl<'a> Codegen<'a> {
         }
 
         self.emit_periodic_tail();
-        self.a.commit().expect("Codegen::generate: commit failed");
     }
 
     pub fn refine(self) -> Translation {
         debug!("refine: code size = {} bytes. #(offsets) = {}", self.a.offset().0, self.v_offset_to_translation_offset.len());
         Translation {
-            backing: self.a,
+            backing: self.a.finalize().unwrap(),
             v_offset_to_translation_offset: self.v_offset_to_translation_offset,
             exception_points: self.exception_points,
             jalr_patch_points: self.jalr_patch_points,
@@ -1222,7 +1221,7 @@ impl<'a> Codegen<'a> {
             ; b >after
 
             ; tail_exception_exit:
-            ; str X(trash_reg_w() as u32), [X(runtime_reg() as u32), Runtime::offset_error_reason() as u32]
+            ; str W(trash_reg_w() as u32), [X(runtime_reg() as u32), Runtime::offset_error_reason() as u32]
             ; ldr X(trash_reg_w() as u32), [X(runtime_reg() as u32), Runtime::offset_exception_entry() as u32]
             ; br X(trash_reg_w() as u32)
 
