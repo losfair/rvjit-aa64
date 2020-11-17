@@ -15,7 +15,8 @@ pub struct Runtime {
     error_data: u64,
     error_reason: u64,
     exception_entry: unsafe extern "C" fn () -> !,
-    memory_regs: [u64; 8],
+    memory_regs: [u64; 7],
+    current_vbase: u64,
     spill: [u64; 32], // FIXME: only the first 256 bytes of Runtime are directly addressable so latter spill locations may not be accessible
     guest_save: [u64; 32],
 
@@ -40,8 +41,12 @@ impl Runtime {
         Self::offset_exception_entry() + 8
     }
 
+    pub const fn offset_current_vbase() -> usize {
+        Self::offset_memory_regs() + 7 * 8
+    }
+
     pub const fn offset_spill() -> usize {
-        Self::offset_memory_regs() + 8 * 8
+        Self::offset_current_vbase() + 8
     }
 
     pub const fn offset_guest_save() -> usize {
@@ -55,7 +60,8 @@ impl Runtime {
             error_data: 0,
             error_reason: 0,
             exception_entry: crate::entry_exit::_rvjit_guest_exception,
-            memory_regs: [0; 8],
+            memory_regs: [0; 7],
+            current_vbase: 0,
             spill: [0; 32],
             guest_save: [0; 32],
 
@@ -286,7 +292,7 @@ impl Section {
 
         let mut translation = self.translation.lock().unwrap();
         if translation.is_none() {
-            let t = Translation::new(self.base_v, self.data.get());
+            let t = Translation::new(self.data.get());
             *self.rtstore.lock().unwrap() = t.rtstore_template.clone();
             *translation = Some(t);
         }
@@ -317,6 +323,7 @@ impl Section {
 
                 // Initialize runtime environment
                 rt.guest_save[crate::translation::rtstore_reg() as usize] = rtstore.as_mut_ptr() as u64;
+                rt.current_vbase = self.base_v;
 
                 {
                     let executor = translation.backing.reader();

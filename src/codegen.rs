@@ -15,7 +15,6 @@ use log::debug;
 
 pub struct Codegen<'a> {
     a: Assembler,
-    base_vpc: u64,
     spill: SpillMachine,
     raw: &'a [u8],
     v_offset_to_translation_offset: Box<[u32]>,
@@ -27,7 +26,7 @@ pub struct Codegen<'a> {
 }
 
 impl<'a> Codegen<'a> {
-    pub fn new(base_vpc: u64, raw: &'a [u8]) -> Codegen<'a> {
+    pub fn new(raw: &'a [u8]) -> Codegen<'a> {
         let mut a = Assembler::new().unwrap();
         let max_num_instructions = raw.len() / 2;
         let v_offset_to_translation_offset = vec![std::u32::MAX; max_num_instructions].into_boxed_slice();
@@ -35,7 +34,6 @@ impl<'a> Codegen<'a> {
 
         Codegen {
             a,
-            base_vpc,
             spill: SpillMachine::new(),
             raw,
             v_offset_to_translation_offset,
@@ -49,11 +47,11 @@ impl<'a> Codegen<'a> {
 
     pub fn generate(&mut self) {
         let mut cursor = self.raw;
-        let mut vpc = self.base_vpc;
+        let mut voff: u32 = 0;
 
         let mut acc_size: usize = 0;
         while let Ok(x) = cursor.read_u16::<LittleEndian>() {
-            let inst_offset = ((vpc - self.base_vpc) / 2) as usize;
+            let inst_offset = (voff / 2) as usize;
             let label = self.relative_br_labels[inst_offset];
 
             self.v_offset_to_translation_offset[inst_offset] = self.a.offset().0 as u32;
@@ -69,12 +67,12 @@ impl<'a> Codegen<'a> {
 
                 if let Ok(y) = cursor.read_u16::<LittleEndian>() {
                     let inst = ((y as u32) << 16) | (x as u32);
-                    self.emit_once(vpc, inst);
+                    self.emit_once(voff, inst);
                 } else {
-                    self.emit_ud(vpc);
+                    self.emit_ud(voff);
                 }
 
-                vpc += 4;
+                voff += 4;
             } else {
                 // 2-byte instructions
                 dynasm!(self.a
@@ -84,14 +82,14 @@ impl<'a> Codegen<'a> {
 
                 match crate::rvc::decompress(x) {
                     Some(inst) => {
-                        self.emit_once(vpc, inst);
+                        self.emit_once(voff, inst);
                     }
                     None => {
-                        self.emit_ud(vpc);
+                        self.emit_ud(voff);
                     }
                 }
 
-                vpc += 2;
+                voff += 2;
             }
 
             let asm_offset = self.a.offset().0;
@@ -119,17 +117,16 @@ impl<'a> Codegen<'a> {
         }
     }
 
-    fn prepare_rel_br(&mut self, vpc: u64, offset: i32) -> Option<DynamicLabel> {
-        let dst_pc = ((vpc as i64) + (offset as i64)) as u64;
-
-        if dst_pc < self.base_vpc {
-            self.emit_exception(vpc, error::ERROR_REASON_BRANCH_OOB);
+    fn prepare_rel_br(&mut self, voff: u32, offset: i32) -> Option<DynamicLabel> {
+        let dst_voff = voff as u64 as i64 + offset as i64;
+        if dst_voff < 0 {
+            self.emit_exception(voff, error::ERROR_REASON_BRANCH_OOB);
             return None;
         }
 
-        let dst_offset = (dst_pc - self.base_vpc) / 2;
+        let dst_offset = (dst_voff as u64) / 2;
         if dst_offset >= self.relative_br_labels.len() as u64 {
-            self.emit_exception(vpc, error::ERROR_REASON_BRANCH_OOB);
+            self.emit_exception(voff, error::ERROR_REASON_BRANCH_OOB);
             return None;
         }
 
@@ -137,14 +134,14 @@ impl<'a> Codegen<'a> {
         Some(label)
     }
 
-    fn emit_once(&mut self, vpc: u64, inst: u32) {
+    fn emit_once(&mut self, voff: u32, inst: u32) {
         match i_op(inst) {
             0b0010011 => {
                 // arith-i 64-bit
                 let (rd, rs, rd_h, rs_h) = self.spill.map_register_tuple_w_r(&mut self.a, i_rd(inst) as _, i_rs(inst) as _);
                 let imm = i_itype_imm(inst);
 
-                self.emit_itype(vpc, inst, rd, rs, imm);
+                self.emit_itype(voff, inst, rd, rs, imm);
 
                 self.spill.release_register_r(&mut self.a, rs_h);
                 self.spill.release_register_w(&mut self.a, rd_h);
@@ -153,7 +150,7 @@ impl<'a> Codegen<'a> {
                 // arith-r 64-bit
                 let (rd, rs, rt, rd_h, rs_h, rt_h) = self.spill.map_register_triple(&mut self.a, i_rd(inst) as _, i_rs(inst) as _, i_rt(inst) as _);
 
-                self.emit_rtype(vpc, inst, rd, rs, rt);
+                self.emit_rtype(voff, inst, rd, rs, rt);
 
                 self.spill.release_register_r(&mut self.a, rs_h);
                 self.spill.release_register_r(&mut self.a, rt_h);
@@ -163,14 +160,14 @@ impl<'a> Codegen<'a> {
                 // arith-i 32-bit
                 let funct3 = i_funct3(inst);
                 if funct3 != 0b000 && funct3 != 0b001 && funct3 != 0b101 {
-                    self.emit_ud(vpc);
+                    self.emit_ud(voff);
                     return;
                 }
 
                 let (rd, rs, rd_h, rs_h) = self.spill.map_register_tuple_w_r(&mut self.a, i_rd(inst) as _, i_rs(inst) as _);
                 let imm = i_itype_imm(inst);
 
-                self.emit_itype(vpc, inst, rd, rs, imm);
+                self.emit_itype(voff, inst, rd, rs, imm);
 
                 self.spill.release_register_r(&mut self.a, rs_h);
                 self.spill.release_register_w(&mut self.a, rd_h);
@@ -179,13 +176,13 @@ impl<'a> Codegen<'a> {
                 // arith-r 32-bit
                 let funct3 = i_funct3(inst);
                 if funct3 == 0b010 || funct3 == 0b011 {
-                    self.emit_ud(vpc);
+                    self.emit_ud(voff);
                     return;
                 }
 
                 let (rd, rs, rt, rd_h, rs_h, rt_h) = self.spill.map_register_triple(&mut self.a, i_rd(inst) as _, i_rs(inst) as _, i_rt(inst) as _);
 
-                self.emit_rtype(vpc, inst, rd, rs, rt);
+                self.emit_rtype(voff, inst, rd, rs, rt);
 
                 self.spill.release_register_r(&mut self.a, rs_h);
                 self.spill.release_register_r(&mut self.a, rt_h);
@@ -197,9 +194,9 @@ impl<'a> Codegen<'a> {
                 let imm = i_btype_imm(inst);
 
                 if funct3 == 0b010 || funct3 == 0b011 {
-                    self.emit_ud(vpc);
+                    self.emit_ud(voff);
                 } else {
-                    let label = match self.prepare_rel_br(vpc, imm as i32) {
+                    let label = match self.prepare_rel_br(voff, imm as i32) {
                         Some(x) => x,
                         None => return
                     };
@@ -215,7 +212,7 @@ impl<'a> Codegen<'a> {
                     self.spill.release_register_r(&mut self.a, rs_h);
                     self.spill.release_register_r(&mut self.a, rt_h);
 
-                    self.emit_btype_late(vpc, inst, label);
+                    self.emit_btype_late(voff, inst, label);
                 }
             }
             0b0110111 => {
@@ -237,21 +234,21 @@ impl<'a> Codegen<'a> {
                 let imm = i_utype_imm(inst);
                 let (rd, rd_h) = self.spill.map_register_w(&mut self.a, i_rd(inst) as _, &[]);
 
-                let value = vpc + ((imm << 12) as i32 as i64 as u64);
-                ld_imm64(&mut self.a, rd, value);
+                let value = voff + (imm << 12);
+                self.load_vpc(value, rd as _, 30);
 
                 self.spill.release_register_w(&mut self.a, rd_h);
             }
             0b1101111 => {
                 // jal
                 let imm = i_jtype_imm(inst);
-                let label = match self.prepare_rel_br(vpc, imm as i32) {
+                let label = match self.prepare_rel_br(voff, imm as i32) {
                     Some(x) => x,
                     None => return
                 };
                 
                 let (rd, rd_h) = self.spill.map_register_w(&mut self.a, i_rd(inst) as _, &[]);
-                ld_imm64(&mut self.a, rd, vpc + 4);
+                self.load_vpc(voff + 4, rd as _, 30);
                 self.spill.release_register_w(&mut self.a, rd_h);
 
                 dynasm!(self.a
@@ -262,7 +259,7 @@ impl<'a> Codegen<'a> {
             0b1100111 => {
                 // jalr
                 let imm = i_itype_imm(inst);
-                self.emit_jalr(vpc, i_rd(inst) as _, i_rs(inst) as _, imm)
+                self.emit_jalr(voff, i_rd(inst) as _, i_rs(inst) as _, imm)
             }
             0b0000011 => {
                 // load
@@ -273,7 +270,7 @@ impl<'a> Codegen<'a> {
                 match i_funct3(inst) {
                     0b000 => {
                         // lb
-                        self.emit_load(vpc, raw_rd, raw_rs, imm, 1, |this, rd, rs| {
+                        self.emit_load(voff, raw_rd, raw_rs, imm, 1, |this, rd, rs| {
                             dynasm!(this.a
                                 ; .arch aarch64
                                 ; ldrsb X(rd), [X(rs)]
@@ -282,7 +279,7 @@ impl<'a> Codegen<'a> {
                     }
                     0b001 => {
                         // lh
-                        self.emit_load(vpc, raw_rd, raw_rs, imm, 2, |this, rd, rs| {
+                        self.emit_load(voff, raw_rd, raw_rs, imm, 2, |this, rd, rs| {
                             dynasm!(this.a
                                 ; .arch aarch64
                                 ; ldrsh X(rd), [X(rs)]
@@ -291,7 +288,7 @@ impl<'a> Codegen<'a> {
                     }
                     0b010 => {
                         // lw
-                        self.emit_load(vpc, raw_rd, raw_rs, imm, 4, |this, rd, rs| {
+                        self.emit_load(voff, raw_rd, raw_rs, imm, 4, |this, rd, rs| {
                             dynasm!(this.a
                                 ; .arch aarch64
                                 ; ldrsw X(rd), [X(rs)]
@@ -300,7 +297,7 @@ impl<'a> Codegen<'a> {
                     }
                     0b011 => {
                         // ld
-                        self.emit_load(vpc, raw_rd, raw_rs, imm, 8, |this, rd, rs| {
+                        self.emit_load(voff, raw_rd, raw_rs, imm, 8, |this, rd, rs| {
                             dynasm!(this.a
                                 ; .arch aarch64
                                 ; ldr X(rd), [X(rs)]
@@ -309,7 +306,7 @@ impl<'a> Codegen<'a> {
                     }
                     0b100 => {
                         // lbu
-                        self.emit_load(vpc, raw_rd, raw_rs, imm, 1, |this, rd, rs| {
+                        self.emit_load(voff, raw_rd, raw_rs, imm, 1, |this, rd, rs| {
                             dynasm!(this.a
                                 ; .arch aarch64
                                 ; ldrb W(rd), [X(rs)]
@@ -318,7 +315,7 @@ impl<'a> Codegen<'a> {
                     }
                     0b101 => {
                         // lhu
-                        self.emit_load(vpc, raw_rd, raw_rs, imm, 2, |this, rd, rs| {
+                        self.emit_load(voff, raw_rd, raw_rs, imm, 2, |this, rd, rs| {
                             dynasm!(this.a
                                 ; .arch aarch64
                                 ; ldrh W(rd), [X(rs)]
@@ -327,14 +324,14 @@ impl<'a> Codegen<'a> {
                     }
                     0b110 => {
                         // lwu
-                        self.emit_load(vpc, raw_rd, raw_rs, imm, 4, |this, rd, rs| {
+                        self.emit_load(voff, raw_rd, raw_rs, imm, 4, |this, rd, rs| {
                             dynasm!(this.a
                                 ; .arch aarch64
                                 ; ldr W(rd), [X(rs)]
                             );
                         });
                     }
-                    _ => self.emit_ud(vpc)
+                    _ => self.emit_ud(voff)
                 }
             }
             0b0100011 => {
@@ -347,7 +344,7 @@ impl<'a> Codegen<'a> {
                 match i_funct3(inst) {
                     0b000 => {
                         // sb
-                        self.emit_store(vpc, raw_rs, raw_rt, imm, 1, |this, rt, rs| {
+                        self.emit_store(voff, raw_rs, raw_rt, imm, 1, |this, rt, rs| {
                             dynasm!(this.a
                                 ; .arch aarch64
                                 ; strb W(rt), [X(rs)]
@@ -356,7 +353,7 @@ impl<'a> Codegen<'a> {
                     }
                     0b001 => {
                         // sh
-                        self.emit_store(vpc, raw_rs, raw_rt, imm, 2, |this, rt, rs| {
+                        self.emit_store(voff, raw_rs, raw_rt, imm, 2, |this, rt, rs| {
                             dynasm!(this.a
                                 ; .arch aarch64
                                 ; strh W(rt), [X(rs)]
@@ -365,7 +362,7 @@ impl<'a> Codegen<'a> {
                     }
                     0b010 => {
                         // sw
-                        self.emit_store(vpc, raw_rs, raw_rt, imm, 4, |this, rt, rs| {
+                        self.emit_store(voff, raw_rs, raw_rt, imm, 4, |this, rt, rs| {
                             dynasm!(this.a
                                 ; .arch aarch64
                                 ; str W(rt), [X(rs)]
@@ -374,14 +371,14 @@ impl<'a> Codegen<'a> {
                     }
                     0b011 => {
                         // sd
-                        self.emit_store(vpc, raw_rs, raw_rt, imm, 8, |this, rt, rs| {
+                        self.emit_store(voff, raw_rs, raw_rt, imm, 8, |this, rt, rs| {
                             dynasm!(this.a
                                 ; .arch aarch64
                                 ; str X(rt), [X(rs)]
                             );
                         });
                     }
-                    _ => self.emit_ud(vpc)
+                    _ => self.emit_ud(voff)
                 }
             }
             0b1110011 => {
@@ -389,13 +386,13 @@ impl<'a> Codegen<'a> {
                 let imm = i_itype_imm(inst);
                 if imm & 0b1 == 0 {
                     // ecall
-                    self.emit_exception(vpc, error::ERROR_REASON_ECALL);
+                    self.emit_exception(voff, error::ERROR_REASON_ECALL);
                 } else {
                     // ebreak
-                    self.emit_exception(vpc, error::ERROR_REASON_EBREAK);
+                    self.emit_exception(voff, error::ERROR_REASON_EBREAK);
                 }
             }
-            _ => self.emit_ud(vpc)
+            _ => self.emit_ud(voff)
         }
     }
 
@@ -423,7 +420,17 @@ impl<'a> Codegen<'a> {
         );
     }
 
-    fn emit_load<F: FnOnce(&mut Self, u32, u32)>(&mut self, vpc: u64, raw_rd: u32, raw_rs: u32, imm: u32, access_size: u32, emit_inner: F) {
+    fn load_vpc(&mut self, voff: u32, dst_reg: u32, temp_reg: u32) {
+        ld_imm64_opt(&mut self.a, temp_reg as _, voff as u64);
+
+        dynasm!(self.a
+            ; .arch aarch64
+            ; ldr X(dst_reg), [X(runtime_reg()), Runtime::offset_current_vbase() as u32]
+            ; add X(dst_reg), X(dst_reg), X(temp_reg)
+        );
+    }
+
+    fn emit_load<F: FnOnce(&mut Self, u32, u32)>(&mut self, voff: u32, raw_rd: u32, raw_rs: u32, imm: u32, access_size: u32, emit_inner: F) {
         let (rd, rs, rd_h, rs_h) = self.spill.map_register_tuple_w_r(&mut self.a, raw_rd as _, raw_rs as _);
 
         // Compute effective address
@@ -468,7 +475,7 @@ impl<'a> Codegen<'a> {
             ; fallback:
         );
 
-        self.emit_exception(vpc, error::ERROR_REASON_LOAD_STORE_MISS);
+        self.emit_exception(voff, error::ERROR_REASON_LOAD_STORE_MISS);
         let pp = LoadStorePatchPoint {
             lower_bound_slot,
             upper_bound_slot,
@@ -490,7 +497,7 @@ impl<'a> Codegen<'a> {
         self.spill.release_register_w(&mut self.a, rd_h);
     }
 
-    fn emit_store<F: FnOnce(&mut Self, u32, u32)>(&mut self, vpc: u64, raw_rs: u32, raw_rt: u32, imm: u32, access_size: u32, emit_inner: F) {
+    fn emit_store<F: FnOnce(&mut Self, u32, u32)>(&mut self, voff: u32, raw_rs: u32, raw_rt: u32, imm: u32, access_size: u32, emit_inner: F) {
         let (rs, rt, rs_h, rt_h) = self.spill.map_register_tuple_r_r(&mut self.a, raw_rs as _, raw_rt as _);
 
         // Compute effective address
@@ -534,7 +541,7 @@ impl<'a> Codegen<'a> {
             ; fallback:
         );
 
-        self.emit_exception(vpc, error::ERROR_REASON_LOAD_STORE_MISS);
+        self.emit_exception(voff, error::ERROR_REASON_LOAD_STORE_MISS);
         let pp = LoadStorePatchPoint {
             lower_bound_slot,
             upper_bound_slot,
@@ -556,16 +563,15 @@ impl<'a> Codegen<'a> {
         self.spill.release_register_r(&mut self.a, rt_h);
     }
 
-    fn emit_jalr(&mut self, vpc: u64, raw_rd: u32, raw_rs: u32, imm: u32) {
+    fn emit_jalr(&mut self, voff: u32, raw_rd: u32, raw_rs: u32, imm: u32) {
         let (rd, rs, rd_h, rs_h) = self.spill.map_register_tuple_w_r(&mut self.a, raw_rd as _, raw_rs as _);
-
-        ld_simm16(&mut self.a, 30, imm);
 
         // XXX: rd == trash_reg_w() is possible so we need to prevent overwrite here
         if raw_rd != 0 {
-            ld_imm64(&mut self.a, rd, vpc + 4);
+            self.load_vpc(voff + 4, rd as _, 30);
         }
 
+        ld_simm16(&mut self.a, 30, imm);
         dynasm!(self.a
             ; .arch aarch64
             ; add X(trash_reg_w() as u32), x30, X(rs as u32)
@@ -624,12 +630,12 @@ impl<'a> Codegen<'a> {
             rs: raw_rs as u32,
             rs_offset: imm as i32,
         };
-        self.emit_exception(vpc, error::ERROR_REASON_JALR_MISS);
+        self.emit_exception(voff, error::ERROR_REASON_JALR_MISS);
         let asm_offset = self.a.offset().0;
         self.jalr_patch_points.insert(asm_offset as u32, pp);
     }
 
-    fn emit_rtype(&mut self, vpc: u64, inst: u32, rd: usize, rs: usize, rt: usize) {
+    fn emit_rtype(&mut self, voff: u32, inst: u32, rd: usize, rs: usize, rt: usize) {
         match i_op(inst) {
             0b0110011 => {
                 match i_funct3(inst) {
@@ -654,7 +660,7 @@ impl<'a> Codegen<'a> {
                             _ => {
                                 // add
                                 if funct7 != 0b0000000 {
-                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting add. vpc = 0x{:016x}", vpc);
+                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting add. voff = 0x{:016x}", voff);
                                 }
                                 dynasm!(self.a
                                     ; .arch aarch64
@@ -677,7 +683,7 @@ impl<'a> Codegen<'a> {
                             _ => {
                                 // sll
                                 if funct7 != 0b0000000 {
-                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting sll. vpc = 0x{:016x}", vpc);
+                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting sll. voff = 0x{:016x}", voff);
                                 }
                                 dynasm!(self.a
                                     ; .arch aarch64
@@ -692,7 +698,7 @@ impl<'a> Codegen<'a> {
                         match funct7 {
                             0b0000001 => {
                                 // mulhsu
-                                debug!("emit_rtype: mulhsu not yet implemented. Replacing with mulh. vpc = 0x{:016x}", vpc);
+                                debug!("emit_rtype: mulhsu not yet implemented. Replacing with mulh. voff = 0x{:016x}", voff);
                                 dynasm!(self.a
                                     ; .arch aarch64
                                     ; smulh X(rd as u32), X(rs as u32), X(rt as u32)
@@ -701,7 +707,7 @@ impl<'a> Codegen<'a> {
                             _ => {
                                 // slt
                                 if funct7 != 0b0000000 {
-                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting slt. vpc = 0x{:016x}", vpc);
+                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting slt. voff = 0x{:016x}", voff);
                                 }
                                 dynasm!(self.a
                                     ; .arch aarch64
@@ -726,7 +732,7 @@ impl<'a> Codegen<'a> {
                             _ => {
                                 // sltu
                                 if funct7 != 0b0000000 {
-                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting sltu. vpc = 0x{:016x}", vpc);
+                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting sltu. voff = 0x{:016x}", voff);
                                 }
                                 dynasm!(self.a
                                     ; .arch aarch64
@@ -751,7 +757,7 @@ impl<'a> Codegen<'a> {
                             _ => {
                                 // xor
                                 if funct7 != 0b0000000 {
-                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting xor. vpc = 0x{:016x}", vpc);
+                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting xor. voff = 0x{:016x}", voff);
                                 }
                                 dynasm!(self.a
                                     ; .arch aarch64
@@ -783,7 +789,7 @@ impl<'a> Codegen<'a> {
                             _ => {
                                 // srl
                                 if funct7 != 0b0000000 {
-                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting srl. vpc = 0x{:016x}", vpc);
+                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting srl. voff = 0x{:016x}", voff);
                                 }
                                 dynasm!(self.a
                                     ; .arch aarch64
@@ -808,7 +814,7 @@ impl<'a> Codegen<'a> {
                             _ => {
                                 // or
                                 if funct7 != 0b0000000 {
-                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting or. vpc = 0x{:016x}", vpc);
+                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting or. voff = 0x{:016x}", voff);
                                 }
                                 dynasm!(self.a
                                     ; .arch aarch64
@@ -833,7 +839,7 @@ impl<'a> Codegen<'a> {
                             _ => {
                                 // and
                                 if funct7 != 0b0000000 {
-                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting and. vpc = 0x{:016x}", vpc);
+                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting and. voff = 0x{:016x}", voff);
                                 }
                                 dynasm!(self.a
                                     ; .arch aarch64
@@ -869,7 +875,7 @@ impl<'a> Codegen<'a> {
                             _ => {
                                 // addw
                                 if funct7 != 0b0000000 {
-                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting addw. vpc = 0x{:016x}", vpc);
+                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting addw. voff = 0x{:016x}", voff);
                                 }
                                 dynasm!(self.a
                                     ; .arch aarch64
@@ -885,7 +891,7 @@ impl<'a> Codegen<'a> {
                             _ => {
                                 // sllw
                                 if funct7 != 0b0000000 {
-                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting sllw. vpc = 0x{:016x}", vpc);
+                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting sllw. voff = 0x{:016x}", voff);
                                 }
                                 dynasm!(self.a
                                     ; .arch aarch64
@@ -901,7 +907,7 @@ impl<'a> Codegen<'a> {
                             _ => {
                                 // divw
                                 if funct7 != 0b0000001 {
-                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting divw. vpc = 0x{:016x}", vpc);
+                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting divw. voff = 0x{:016x}", voff);
                                 }
                                 dynasm!(self.a
                                     ; .arch aarch64
@@ -935,7 +941,7 @@ impl<'a> Codegen<'a> {
                             _ => {
                                 // srlw
                                 if funct7 != 0b0000000 {
-                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting srlw. vpc = 0x{:016x}", vpc);
+                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting srlw. voff = 0x{:016x}", voff);
                                 }
                                 dynasm!(self.a
                                     ; .arch aarch64
@@ -951,7 +957,7 @@ impl<'a> Codegen<'a> {
                             _ => {
                                 // remw
                                 if funct7 != 0b0000001 {
-                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting remw. vpc = 0x{:016x}", vpc);
+                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting remw. voff = 0x{:016x}", voff);
                                 }
                                 dynasm!(self.a
                                     ; .arch aarch64
@@ -968,7 +974,7 @@ impl<'a> Codegen<'a> {
                             _ => {
                                 // remuw
                                 if funct7 != 0b0000001 {
-                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting remuw. vpc = 0x{:016x}", vpc);
+                                    debug!("emit_rtype: bad funct7 but we cannot fail here. emitting remuw. voff = 0x{:016x}", voff);
                                 }
                                 dynasm!(self.a
                                     ; .arch aarch64
@@ -986,7 +992,7 @@ impl<'a> Codegen<'a> {
         }
     }
 
-    fn emit_btype_late(&mut self, vpc: u64, inst: u32, label: DynamicLabel) {
+    fn emit_btype_late(&mut self, voff: u32, inst: u32, label: DynamicLabel) {
         match i_op(inst) {
             0b1100011 => {
                 match i_funct3(inst) {
@@ -1040,7 +1046,7 @@ impl<'a> Codegen<'a> {
         }
     }
 
-    fn emit_itype(&mut self, vpc: u64, inst: u32, rd: usize, rs: usize, imm: u32) {
+    fn emit_itype(&mut self, voff: u32, inst: u32, rd: usize, rs: usize, imm: u32) {
         match i_op(inst) {
             0b0010011 => {
                 // arith-i 64-bit
@@ -1193,8 +1199,8 @@ impl<'a> Codegen<'a> {
         }
     }
 
-    fn emit_exception(&mut self, vpc: u64, reason: u16) {
-        //debug!("static exception @ 0x{:016x}: reason {}", vpc, reason);
+    fn emit_exception(&mut self, voff: u32, reason: u16) {
+        //debug!("static exception @ 0x{:016x}: reason {}", voff, reason);
 
         ld_simm16(&mut self.a, trash_reg_w() as _, reason as u32);
 
@@ -1203,10 +1209,9 @@ impl<'a> Codegen<'a> {
             ; bl >tail_exception_exit
         );
         let translation_offset = self.a.offset().0 as u32;
-        let v_offset = (vpc - self.base_vpc) as u32;
         let spill_mask = self.spill.spilled_regs.get();
         self.exception_points.insert(translation_offset, ExceptionPoint {
-            v_offset,
+            v_offset: voff,
             spill_mask,
         });
     }
@@ -1225,8 +1230,8 @@ impl<'a> Codegen<'a> {
         );
     }
 
-    fn emit_ud(&mut self, vpc: u64) {
-        self.emit_exception(vpc, error::ERROR_REASON_UNDEFINED_INSTRUCTION);
+    fn emit_ud(&mut self, voff: u32) {
+        self.emit_exception(voff, error::ERROR_REASON_UNDEFINED_INSTRUCTION);
     }
 }
 

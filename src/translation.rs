@@ -45,8 +45,8 @@ pub struct LoadStorePatchPoint {
 pub struct RtSlot(pub u32);
 
 impl Translation {
-    pub fn new(base_v: u64, raw: &[u8]) -> Self {
-        let mut cg = Codegen::new(base_v, raw);
+    pub fn new(raw: &[u8]) -> Self {
+        let mut cg = Codegen::new(raw);
         cg.generate();
         cg.refine()
     }
