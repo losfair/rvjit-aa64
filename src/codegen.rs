@@ -6,8 +6,9 @@ use crate::runtime::Runtime;
 use crate::error;
 use byteorder::{LittleEndian, ReadBytesExt};
 use crate::translation::{
-    runtime_reg, rtstore_reg, trash_reg_w, zero_reg_r,
-    ExceptionPoint, VirtualReg, register_map_policy, Translation, JalrPatchPoint, LoadStorePatchPoint
+    runtime_reg, rtstore_reg, trash_reg_w, zero_reg_r, temp1_reg,
+    ExceptionPoint, VirtualReg, register_map_policy, Translation, JalrPatchPoint, LoadStorePatchPoint,
+    RtSlot,
 };
 use std::collections::BTreeMap;
 use log::debug;
@@ -398,6 +399,30 @@ impl<'a> Codegen<'a> {
         }
     }
 
+    fn alloc_rtslot(&mut self, default_value: u64) -> RtSlot {
+        let i = self.rtstore_template.len();
+        self.rtstore_template.push(default_value);
+        RtSlot(i as u32)
+    }
+
+    fn load_rtslot(&mut self, slot: RtSlot, dst_reg: u32) {
+        ld_imm64_opt(&mut self.a, dst_reg as _, slot.0 as u64);
+        dynasm!(self.a
+            ; .arch aarch64
+            ; add X(dst_reg), X(rtstore_reg()), X(dst_reg), lsl 3 // 8-byte slots
+            ; ldr X(dst_reg), [X(dst_reg)]
+        );
+    }
+
+    fn load_rtslot_pair(&mut self, slot: RtSlot, dst_reg1: u32, dst_reg2: u32) {
+        ld_imm64_opt(&mut self.a, dst_reg1 as _, slot.0 as u64);
+        dynasm!(self.a
+            ; .arch aarch64
+            ; add X(dst_reg1), X(rtstore_reg()), X(dst_reg1), lsl 3 // 8-byte slots
+            ; ldp X(dst_reg1), X(dst_reg2), [X(dst_reg1)]
+        );
+    }
+
     fn emit_load<F: FnOnce(&mut Self, u32, u32)>(&mut self, vpc: u64, raw_rd: u32, raw_rs: u32, imm: u32, access_size: u32, emit_inner: F) {
         let (rd, rs, rd_h, rs_h) = self.spill.map_register_tuple_w_r(&mut self.a, raw_rd as _, raw_rs as _);
 
@@ -408,33 +433,33 @@ impl<'a> Codegen<'a> {
             ; add X(trash_reg_w() as u32), X(trash_reg_w() as u32), X(rs as u32)
         );
 
-        // Upper bound
-        // XXX: Substract load size when patching
-        let pp_upper = self.a.offset().0;
-        ld_imm64(&mut self.a, 30, 0); // PATCH
+        let lower_bound_slot = self.alloc_rtslot(std::u64::MAX);
+        let upper_bound_slot = self.alloc_rtslot(0);
+        let reloff_slot = self.alloc_rtslot(std::u64::MAX);
+
+        self.load_rtslot_pair(lower_bound_slot, 30, temp1_reg());
+
+        // Check bounds
         dynasm!(self.a
             ; .arch aarch64
+
+            // Lower bound
             ; cmp X(trash_reg_w() as u32), x30
+            ; b.lo >fallback
+
+            // Upper bound
+            ; cmp X(trash_reg_w() as u32), X(temp1_reg())
             ; b.hs >fallback
         );
 
-        // Lower bound
-        let pp_lower = self.a.offset().0;
-        ld_imm64(&mut self.a, 30, std::u64::MAX); // PATCH
-        dynasm!(self.a
-            ; .arch aarch64
-            ; cmp X(trash_reg_w() as u32), x30
-            ; b.lo >fallback
-        );
-
         // v_addr + this_offset = real_addr
-        let pp_reloff = self.a.offset().0;
-        ld_imm64(&mut self.a, 30, std::u64::MAX); // PATCH
+        self.load_rtslot(reloff_slot, 30);
         dynasm!(self.a
             ; .arch aarch64
             ; add X(trash_reg_w() as u32), X(trash_reg_w() as u32), x30
         );
 
+        // XXX: rd == trash_reg_w() is possible if rd is RISC-V zero register
         emit_inner(self, rd as _, trash_reg_w() as _);
 
         dynasm!(self.a
@@ -445,9 +470,9 @@ impl<'a> Codegen<'a> {
 
         self.emit_exception(vpc, error::ERROR_REASON_LOAD_STORE_MISS);
         let pp = LoadStorePatchPoint {
-            lower_bound_offset: pp_lower as _,
-            upper_bound_offset: pp_upper as _,
-            reloff_offset: pp_reloff as _,
+            lower_bound_slot,
+            upper_bound_slot,
+            reloff_slot,
             rs: raw_rs as u32,
             rs_offset: imm as i32,
             access_size: access_size,
@@ -475,28 +500,27 @@ impl<'a> Codegen<'a> {
             ; add X(trash_reg_w() as u32), X(trash_reg_w() as u32), X(rs as u32)
         );
 
-        // Upper bound
-        // XXX: Substract load size when patching
-        let pp_upper = self.a.offset().0;
-        ld_imm64(&mut self.a, 30, 0); // PATCH
+        let lower_bound_slot = self.alloc_rtslot(std::u64::MAX);
+        let upper_bound_slot = self.alloc_rtslot(0);
+        let reloff_slot = self.alloc_rtslot(std::u64::MAX);
+
+        self.load_rtslot_pair(lower_bound_slot, 30, temp1_reg());
+
+        // Check bounds
         dynasm!(self.a
             ; .arch aarch64
+
+            // Lower bound
             ; cmp X(trash_reg_w() as u32), x30
+            ; b.lo >fallback
+
+            // Upper bound
+            ; cmp X(trash_reg_w() as u32), X(temp1_reg())
             ; b.hs >fallback
         );
 
-        // Lower bound
-        let pp_lower = self.a.offset().0;
-        ld_imm64(&mut self.a, 30, std::u64::MAX); // PATCH
-        dynasm!(self.a
-            ; .arch aarch64
-            ; cmp X(trash_reg_w() as u32), x30
-            ; b.lo >fallback
-        );
-
         // v_addr + this_offset = real_addr
-        let pp_reloff = self.a.offset().0;
-        ld_imm64(&mut self.a, 30, std::u64::MAX); // PATCH
+        self.load_rtslot(reloff_slot, 30);
         dynasm!(self.a
             ; .arch aarch64
             ; add X(trash_reg_w() as u32), X(trash_reg_w() as u32), x30
@@ -512,9 +536,9 @@ impl<'a> Codegen<'a> {
 
         self.emit_exception(vpc, error::ERROR_REASON_LOAD_STORE_MISS);
         let pp = LoadStorePatchPoint {
-            lower_bound_offset: pp_lower as _,
-            upper_bound_offset: pp_upper as _,
-            reloff_offset: pp_reloff as _,
+            lower_bound_slot,
+            upper_bound_slot,
+            reloff_slot,
             rs: raw_rs as u32,
             rs_offset: imm as i32,
             access_size: access_size,
@@ -536,66 +560,66 @@ impl<'a> Codegen<'a> {
         let (rd, rs, rd_h, rs_h) = self.spill.map_register_tuple_w_r(&mut self.a, raw_rd as _, raw_rs as _);
 
         ld_simm16(&mut self.a, 30, imm);
+
+        // XXX: rd == trash_reg_w() is possible so we need to prevent overwrite here
+        if raw_rd != 0 {
+            ld_imm64(&mut self.a, rd, vpc + 4);
+        }
+
         dynasm!(self.a
             ; .arch aarch64
             ; add X(trash_reg_w() as u32), x30, X(rs as u32)
         );
 
-        // Upper bound
-        let pp_upper = self.a.offset().0;
-        ld_imm64(&mut self.a, 30, 0); // PATCH
-        dynasm!(self.a
-            ; .arch aarch64
-            ; cmp X(trash_reg_w() as u32), x30
-            ; b.hs >fallback
-        );
+        self.spill.release_register_r(&mut self.a, rs_h);
+        self.spill.release_register_w(&mut self.a, rd_h);
 
-        // Lower bound
-        let pp_lower = self.a.offset().0;
-        ld_imm64(&mut self.a, 30, std::u64::MAX); // PATCH
+        let lower_bound_slot = self.alloc_rtslot(std::u64::MAX);
+        let upper_bound_slot = self.alloc_rtslot(0);
+        let v2real_table_slot = self.alloc_rtslot(0);
+        let machine_base_slot = self.alloc_rtslot(0);
+
+        self.load_rtslot_pair(lower_bound_slot, 30, temp1_reg());
+
+        // Check bounds
         dynasm!(self.a
             ; .arch aarch64
+
+            // Upper bound
+            ; cmp X(trash_reg_w() as u32), X(temp1_reg())
+            ; b.hs >fallback
+
+            // Lower bound
             ; cmp X(trash_reg_w() as u32), x30
             ; b.lo >fallback
             ; sub X(trash_reg_w() as u32), X(trash_reg_w() as u32), x30
         );
 
-        // V/real offset table
-        let pp_v2real_table = self.a.offset().0;
-        ld_imm64(&mut self.a, 30, 0); // PATCH
-
-        // Load real offset from v2real table
+        self.load_rtslot_pair(v2real_table_slot, 30, temp1_reg());
         dynasm!(self.a
             ; .arch aarch64
+
+            // Load real offset from v2real table
             ; lsr X(trash_reg_w() as u32), X(trash_reg_w() as u32), 1
-            ; lsl X(trash_reg_w() as u32), X(trash_reg_w() as u32), 2
-            ; add x30, X(trash_reg_w() as u32), x30
+            ; add x30, x30, X(trash_reg_w() as u32), lsl 2
             ; ldr W(trash_reg_w() as u32), [x30]
 
             // Check empty entries
             ; cmn W(trash_reg_w() as u32), 1
             ; b.eq >fallback // branch if value == u32::MAX
-        );
 
-        // Machine code base
-        let pp_machine_base = self.a.offset().0;
-        ld_imm64(&mut self.a, 30, 0); // PATCH
-        dynasm!(self.a
-            ; .arch aarch64
-            ; add x30, X(trash_reg_w() as u32), x30 // compute actual address by base + offset
-            ; b >ok
-        );
+            // Compute actual address by base + offset
+            ; add x30, X(trash_reg_w() as u32), X(temp1_reg())
+            ; br x30
 
-        dynasm!(self.a
-            ; .arch aarch64
             ; fallback:
         );
 
         let pp = JalrPatchPoint {
-            lower_bound_offset: pp_lower as u32,
-            upper_bound_offset: pp_upper as u32,
-            v2real_table_offset: pp_v2real_table as u32,
-            machine_base_offset: pp_machine_base as u32,
+            lower_bound_slot,
+            upper_bound_slot,
+            v2real_table_slot,
+            machine_base_slot,
             rd: raw_rd as u32,
             rs: raw_rs as u32,
             rs_offset: imm as i32,
@@ -603,21 +627,6 @@ impl<'a> Codegen<'a> {
         self.emit_exception(vpc, error::ERROR_REASON_JALR_MISS);
         let asm_offset = self.a.offset().0;
         self.jalr_patch_points.insert(asm_offset as u32, pp);
-
-        dynasm!(self.a
-            ; .arch aarch64
-            ; ok:
-        );
-        ld_imm64(&mut self.a, rd, vpc + 4);
-
-        self.spill.release_register_r(&mut self.a, rs_h);
-        self.spill.release_register_w(&mut self.a, rd_h);
-
-        dynasm!(self.a
-            ; .arch aarch64
-            ; br x30
-        );
-        
     }
 
     fn emit_rtype(&mut self, vpc: u64, inst: u32, rd: usize, rs: usize, rt: usize) {
@@ -1442,11 +1451,6 @@ impl SpillMachine {
 }
 
 pub(crate) fn ld_simm16<A: DynasmApi>(a: &mut A, rd: usize, imm: u32) {
-    if rd == 31 {
-        // xzr
-        return;
-    }
-
     let imm = imm as i32;
     if imm < 0 {
         let imm = !(imm as u32);
@@ -1463,12 +1467,39 @@ pub(crate) fn ld_simm16<A: DynasmApi>(a: &mut A, rd: usize, imm: u32) {
     }
 }
 
-pub(crate) fn ld_imm64<A: DynasmApi>(a: &mut A, rd: usize, imm: u64) {
-    if rd == 31 {
-        // xzr
-        return;
+pub(crate) fn ld_imm64_opt<A: DynasmApi>(a: &mut A, rd: usize, imm: u64) {
+    dynasm!(
+        a
+        ; .arch aarch64
+        ; movz X(rd as u32), (imm & 0xffff) as u32
+    );
+
+    if ((imm >> 16) & 0xffff) != 0 {
+        dynasm!(
+            a
+            ; .arch aarch64
+            ; movk X(rd as u32), ((imm >> 16) & 0xffff) as u32, lsl 16
+        );
     }
 
+    if ((imm >> 32) & 0xffff) != 0 {
+        dynasm!(
+            a
+            ; .arch aarch64
+            ; movk X(rd as u32), ((imm >> 32) & 0xffff) as u32, lsl 32
+        );
+    }
+
+    if ((imm >> 48) & 0xffff) != 0 {
+        dynasm!(
+            a
+            ; .arch aarch64
+            ; movk X(rd as u32), ((imm >> 48) & 0xffff) as u32, lsl 48
+        );
+    }
+}
+
+pub(crate) fn ld_imm64<A: DynasmApi>(a: &mut A, rd: usize, imm: u64) {
     dynasm!(
         a
         ; .arch aarch64

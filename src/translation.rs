@@ -21,10 +21,10 @@ pub struct ExceptionPoint {
 
 #[derive(Copy, Clone, Debug)]
 pub struct JalrPatchPoint {
-    pub lower_bound_offset: u32,
-    pub upper_bound_offset: u32,
-    pub v2real_table_offset: u32,
-    pub machine_base_offset: u32,
+    pub lower_bound_slot: RtSlot,
+    pub upper_bound_slot: RtSlot,
+    pub v2real_table_slot: RtSlot,
+    pub machine_base_slot: RtSlot,
     pub rd: u32,
     pub rs: u32,
     pub rs_offset: i32,
@@ -32,39 +32,17 @@ pub struct JalrPatchPoint {
 
 #[derive(Copy, Clone, Debug)]
 pub struct LoadStorePatchPoint {
-    pub lower_bound_offset: u32,
-    pub upper_bound_offset: u32,
-    pub reloff_offset: u32,
+    pub lower_bound_slot: RtSlot,
+    pub upper_bound_slot: RtSlot,
+    pub reloff_slot: RtSlot,
     pub rs: u32,
     pub rs_offset: i32,
     pub access_size: u32,
     pub is_store: bool,
 }
 
-trait PatchPoint {
-    fn offsets(&self) -> Vec<u32>;
-    fn max_patch_size(&self) -> u32;
-}
-
-impl PatchPoint for JalrPatchPoint {
-    fn offsets(&self) -> Vec<u32> {
-        vec![self.lower_bound_offset, self.upper_bound_offset, self.v2real_table_offset, self.machine_base_offset]
-    }
-
-    fn max_patch_size(&self) -> u32 {
-        64
-    }
-}
-
-impl PatchPoint for LoadStorePatchPoint {
-    fn offsets(&self) -> Vec<u32> {
-        vec![self.lower_bound_offset, self.upper_bound_offset, self.reloff_offset]
-    }
-
-    fn max_patch_size(&self) -> u32 {
-        64
-    }
-}
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct RtSlot(pub u32);
 
 impl Translation {
     pub fn new(base_v: u64, raw: &[u8]) -> Self {
@@ -96,7 +74,7 @@ impl Translation {
         self.load_store_patch_points.get(&exc_offset).cloned()
     }
 
-    pub fn patch_load_store(&mut self, exc_offset: u32, target_section: &Section) {
+    pub fn patch_load_store(&mut self, exc_offset: u32, rtstore: &mut [u64], target_section: &Section) {
         let pp = match self.get_load_store_patch_point(exc_offset) {
             Some(x) => x,
             None => panic!("Translation::patch_load_store: cannot find patch point"),
@@ -106,41 +84,23 @@ impl Translation {
         let upper_bound = target_section.base_v() + target_section.get_ro().len() as u64 - (pp.access_size - 1) as u64;
         let reloff = (target_section.get_ro().as_ptr() as u64).wrapping_sub(target_section.base_v());
 
-        self.backing.alter(|m| {
-            m.goto(AssemblyOffset(pp.lower_bound_offset as _));
-            codegen::ld_imm64(m, 30, lower_bound);
-
-            m.goto(AssemblyOffset(pp.upper_bound_offset as _));
-            codegen::ld_imm64(m, 30, upper_bound);
-
-            m.goto(AssemblyOffset(pp.reloff_offset as _));
-            codegen::ld_imm64(m, 30, reloff);
-        }).unwrap();
-
-        self.flush_patch_point(&pp);
+        rtstore[pp.lower_bound_slot.0 as usize] = lower_bound;
+        rtstore[pp.upper_bound_slot.0 as usize] = upper_bound;
+        rtstore[pp.reloff_slot.0 as usize] = reloff;
     }
 
-    pub fn try_invalidate_load_store(&mut self, exc_offset: u32) {
+    pub fn try_invalidate_load_store(&mut self, exc_offset: u32, rtstore: &mut [u64]) {
         let pp = match self.get_load_store_patch_point(exc_offset) {
             Some(x) => x,
             None => return,
         };
 
-        self.backing.alter(|m| {
-            m.goto(AssemblyOffset(pp.lower_bound_offset as _));
-            codegen::ld_imm64(m, 30, std::u64::MAX);
-
-            m.goto(AssemblyOffset(pp.upper_bound_offset as _));
-            codegen::ld_imm64(m, 30, 0);
-
-            m.goto(AssemblyOffset(pp.reloff_offset as _));
-            codegen::ld_imm64(m, 30, std::u64::MAX);
-        }).unwrap();
-
-        self.flush_patch_point(&pp);
+        rtstore[pp.lower_bound_slot.0 as usize] = std::u64::MAX;
+        rtstore[pp.upper_bound_slot.0 as usize] = 0;
+        rtstore[pp.reloff_slot.0 as usize] = std::u64::MAX;
     }
 
-    pub fn patch_jalr(&mut self, exc_offset: u32, target_base_v: u64, target: Option<&Translation>) {
+    pub fn patch_jalr(&mut self, exc_offset: u32, rtstore: &mut [u64], target_base_v: u64, target: Option<&Translation>) {
         let pp = match self.get_jalr_patch_point(exc_offset) {
             Some(x) => x,
             None => panic!("Translation::patch_jalr: cannot find patch point"),
@@ -156,39 +116,11 @@ impl Translation {
         let upper_bound = target_base_v + ((target.v_offset_to_translation_offset.len() * 2) as u64);
         let v2real_table = target.v_offset_to_translation_offset.as_ptr() as u64;
         let machine_base = target.backing.reader().lock().ptr(AssemblyOffset(0)) as u64;
-
-        self.backing.alter(|m| {
-            m.goto(AssemblyOffset(pp.lower_bound_offset as _));
-            codegen::ld_imm64(m, 30, lower_bound);
-
-            m.goto(AssemblyOffset(pp.upper_bound_offset as _));
-            codegen::ld_imm64(m, 30, upper_bound);
-
-            m.goto(AssemblyOffset(pp.v2real_table_offset as _));
-            codegen::ld_imm64(m, 30, v2real_table);
-
-            m.goto(AssemblyOffset(pp.machine_base_offset as _));
-            codegen::ld_imm64(m, 30, machine_base);
-        }).unwrap();
-
-        self.flush_patch_point(&pp);
-    }
-
-    fn flush_patch_point<T: PatchPoint>(&self, pp: &T) {
-        let min_offset = pp.offsets().iter().cloned().min().unwrap();
-        let max_offset = pp.offsets().iter().cloned().max().unwrap();
-
-        let executor = self.backing.reader();
-        let executor = executor.lock();
-
-        let flush_start = executor.ptr(AssemblyOffset(min_offset as _)) as usize;
-        let max_size = executor.len() as usize - min_offset as usize;
-        let flush_size = ((max_offset - min_offset) as usize) + pp.max_patch_size() as usize;
-        let flush_size = flush_size.min(max_size);
-
-        unsafe {
-            flush_cache_range(flush_start, flush_size);
-        }
+        
+        rtstore[pp.lower_bound_slot.0 as usize] = lower_bound;
+        rtstore[pp.upper_bound_slot.0 as usize] = upper_bound;
+        rtstore[pp.v2real_table_slot.0 as usize] = v2real_table;
+        rtstore[pp.machine_base_slot.0 as usize] = machine_base;
     }
 }
 
@@ -231,6 +163,10 @@ pub const fn runtime_reg() -> u32 {
 
 pub const fn rtstore_reg() -> u32 {
     26
+}
+
+pub const fn temp1_reg() -> u32 {
+    27
 }
 
 pub const fn zero_reg_r() -> usize {

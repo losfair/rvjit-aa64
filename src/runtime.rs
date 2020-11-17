@@ -235,8 +235,9 @@ impl JitRef {
         if let Some(section) = rt.sections.get(&self.base_v) {
             let mut translation = section.translation.lock().unwrap();
             if let Some(ref mut t) = *translation {
+                let mut rtstore = section.rtstore.lock().unwrap();
                 // FIXME: spurious invalidation is possible (ABA problem)
-                t.try_invalidate_load_store(self.exc_offset);
+                t.try_invalidate_load_store(self.exc_offset, &mut **rtstore);
             }
         }
     }
@@ -337,7 +338,7 @@ impl Section {
                 rt.unspill(exc_point.spill_mask);
                 //rt.debug_print_registers();
 
-                match self.handle_exit(rt, translation, exc_offset) {
+                match self.handle_exit(rt, translation, &mut **rtstore, exc_offset) {
                     Ok(_) => {
                         panic!("unexpected Ok from handle_exit");
                     }
@@ -352,7 +353,7 @@ impl Section {
         }
     }
 
-    fn handle_exit(&self, rt: &mut Runtime, translation: &mut Translation, exc_offset: u32) -> Result<(), ExecError> {
+    fn handle_exit(&self, rt: &mut Runtime, translation: &mut Translation, rtstore: &mut [u64], exc_offset: u32) -> Result<(), ExecError> {
         match rt.error_reason as u16 {
             error::ERROR_REASON_UNDEFINED_INSTRUCTION => {
                 Err(ExecError::UndefinedInstruction)
@@ -381,7 +382,7 @@ impl Section {
                     }
                     // TODO: Better way of detecting equivalence?
                     let start_time = SystemTime::now();
-                    translation.patch_jalr(exc_offset, self.base_v, None);
+                    translation.patch_jalr(exc_offset, rtstore, self.base_v, None);
                     let end_time = SystemTime::now();
                     debug!("patch_jalr duration: {:?}", end_time.duration_since(start_time));
                 }
@@ -419,7 +420,7 @@ impl Section {
                 });
 
                 let start_time = SystemTime::now();
-                translation.patch_load_store(exc_offset, &target_section);
+                translation.patch_load_store(exc_offset, rtstore, &target_section);
                 let end_time = SystemTime::now();
                 debug!("patch_load_store duration: {:?}", end_time.duration_since(start_time));
                 Err(ExecError::Retry)
