@@ -24,7 +24,7 @@ fn main() {
 
     assert!(rt.add_section(Arc::new(Section::new(0x7fff00000000 - (STACK_SIZE as u64), SectionData::new(vec![0u8; STACK_SIZE], SectionFlags::R | SectionFlags::W)))));
 
-    elf::load(&mut rt, &elf_image).unwrap();
+    elf::load_sections(&mut rt, &elf_image).unwrap();
 
     let mut host = Host::new();
 
