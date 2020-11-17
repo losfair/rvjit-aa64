@@ -564,7 +564,7 @@ impl<'a> Codegen<'a> {
 
     fn emit_jalr(&mut self, voff: u32, raw_rd: u32, raw_rs: u32, imm: u32) {
         let (rd, rs, rd_h, rs_h) = self.spill.map_register_tuple_w_r(&mut self.a, raw_rd as _, raw_rs as _);
-
+        
         // XXX: rd == trash_reg_w() is possible so we need to prevent overwrite here
         if raw_rd != 0 {
             self.load_vpc(voff + 4, rd as _, 30);
@@ -1382,10 +1382,10 @@ impl SpillMachine {
         };
 
         // Write release requires stronger writeback
-        let (rd_1, rd_h) = if rd == rs {
+        let (rd_1, rd_h) = if rd == rs && rd != 0 {
             let rs_h = std::mem::replace(&mut rs_h, None);
             (rs_1, rs_h)
-        } else if rd == rt {
+        } else if rd == rt && rd != 0 {
             let rt_h = std::mem::replace(&mut rt_h, None);
             (rt_1, rt_h)
         } else {
@@ -1399,7 +1399,7 @@ impl SpillMachine {
         let (rs_1, mut rs_h) = self.map_register_r(a, rs, &[rd]);
 
         // Write release requires stronger writeback
-        let (rd_1, rd_h) = if rd == rs {
+        let (rd_1, rd_h) = if rd == rs && rd != 0 {
             let rs_h = std::mem::replace(&mut rs_h, None);
             (rs_1, rs_h)
         } else {
