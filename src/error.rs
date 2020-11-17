@@ -8,6 +8,9 @@ pub enum ExecError {
     #[error("attempting to execute code in an NX section")]
     NoX,
 
+    #[error("W+X section not allowed")]
+    WX,
+
     #[error("undefined instruction")]
     UndefinedInstruction,
 

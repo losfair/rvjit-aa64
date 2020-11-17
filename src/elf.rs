@@ -78,7 +78,7 @@ pub fn load_sections(rt: &mut Runtime, image: &[u8]) -> Result<()> {
             let section = Section::new(vaddr, SectionData::new(
                 data,
                 target_flags,
-            ));
+            )?);
             if !rt.add_section(Arc::new(section)) {
                 return Err(LoadError::SectionRejected.into());
             }
@@ -115,7 +115,7 @@ pub fn load(rt: &mut Runtime, image: &[u8]) -> Result<()> {
                         let section = Section::new(vaddr, SectionData::new(
                             data,
                             flags,
-                        ));
+                        )?);
                         if !rt.add_section(Arc::new(section)) {
                             return Err(LoadError::SectionRejected.into());
                         }

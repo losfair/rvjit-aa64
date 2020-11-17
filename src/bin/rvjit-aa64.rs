@@ -22,7 +22,7 @@ fn main() {
     let mut elf_image = vec![0u8; 0];
     elf_image_file.read_to_end(&mut elf_image).unwrap();
 
-    assert!(rt.add_section(Arc::new(Section::new(0x7fff00000000 - (STACK_SIZE as u64), SectionData::new(vec![0u8; STACK_SIZE], SectionFlags::R | SectionFlags::W)))));
+    assert!(rt.add_section(Arc::new(Section::new(0x7fff00000000 - (STACK_SIZE as u64), SectionData::new(vec![0u8; STACK_SIZE], SectionFlags::R | SectionFlags::W).unwrap()))));
 
     elf::load_sections(&mut rt, &elf_image).unwrap();
 
