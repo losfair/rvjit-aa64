@@ -59,31 +59,8 @@ impl MtRuntime {
     pub fn read_section_registry<'a>(&'a self) -> RwLockReadGuard<'a, SectionRegistry> {
         self.section_registry.read().unwrap()
     }
-/*
-    pub fn get_memory_max(&self, start: u64) -> Result<&[u8], ExecError> {
-        let section = if let Some(x) = self.lookup_section_ref(start) {
-            x
-        } else {
-            return Err(ExecError::BadMemDerefAddr)
-        };
-        let m = &section.get_ro()[(start - section.base_v) as usize..];
-        Ok(m)
-    }
 
-    pub fn with_memory(&self, start: u64, len: usize) -> Result<&[u8], ExecError> {
-        let section = if let Some(x) = self.lookup_section_ref(start) {
-            x
-        } else {
-            return Err(ExecError::BadMemDerefAddr)
-        };
-        let m = &section.get_ro()[(start - section.base_v) as usize..];
-        if m.len() < len {
-            return Err(ExecError::BadMemDerefAddr);
-        }
-        Ok(&m[..len])
-    }*/
-
-    pub fn with_memory_mut<F: FnOnce(*mut [u8]) -> R, R>(&self, start: u64, len: usize, f: F) -> Result<R, ExecError> {
+    pub fn with_memory_mut<F: FnOnce(*mut [u8]) -> R, R>(&self, start: u64, len: Option<usize>, f: F) -> Result<R, ExecError> {
         // TODO: Make `Section` private so we can safely do r/w dereferences.
         let registry = self.section_registry.read().unwrap();
         let (base_v, section) = registry.lookup_section(start)?;
@@ -95,13 +72,19 @@ impl MtRuntime {
             return Err(ExecError::BadMemDerefFlags);
         };
         let m = &mut rw[(start - base_v) as usize..];
-        if m.len() < len {
-            return Err(ExecError::BadMemDerefAddr);
-        }
+
+        let m = if let Some(len) = len {
+            if m.len() < len {
+                return Err(ExecError::BadMemDerefAddr);
+            }
+            &mut m[..len]
+        } else {
+            m
+        };
 
         // Still pass a raw pointer to the callback, since multiple mutable references can be created
         // and we want the user to be aware of it.
-        Ok(f(&mut m[..len]))
+        Ok(f(m))
     }
 }
 
