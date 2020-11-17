@@ -114,7 +114,7 @@ impl<'a> Codegen<'a> {
             exception_points: self.exception_points,
             jalr_patch_points: self.jalr_patch_points,
             load_store_patch_points: self.load_store_patch_points,
-            rtstore_template: self.rtstore_template,
+            rtstore_template: self.rtstore_template.into_boxed_slice(),
         }
     }
 

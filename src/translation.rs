@@ -9,7 +9,7 @@ pub struct Translation {
     pub exception_points: BTreeMap<u32, ExceptionPoint>,
     pub jalr_patch_points: BTreeMap<u32, JalrPatchPoint>,
     pub load_store_patch_points: BTreeMap<u32, LoadStorePatchPoint>,
-    pub rtstore_template: Vec<u64>,
+    pub rtstore_template: Box<[u64]>,
     pub backing: Assembler,
 }
 

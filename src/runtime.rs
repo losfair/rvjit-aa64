@@ -245,6 +245,7 @@ impl JitRef {
 pub struct Section {
     base_v: u64,
     data: SectionData,
+    rtstore: Mutex<Box<[u64]>>,
     translation: Mutex<Option<Translation>>,
     jit_refs: Mutex<BTreeSet<JitRef>>,
 }
@@ -254,6 +255,7 @@ impl Section {
         Self {
             base_v,
             data,
+            rtstore: Mutex::new(Box::new([])),
             translation: Mutex::new(None),
             jit_refs: Mutex::new(BTreeSet::new()),
         }
@@ -283,7 +285,9 @@ impl Section {
 
         let mut translation = self.translation.lock().unwrap();
         if translation.is_none() {
-            *translation = Some(Translation::new(self.base_v, self.data.get()));
+            let t = Translation::new(self.base_v, self.data.get());
+            *self.rtstore.lock().unwrap() = t.rtstore_template.clone();
+            *translation = Some(t);
         }
 
         Ok(())
@@ -307,6 +311,11 @@ impl Section {
                 let real_offset = AssemblyOffset(x as _);
                 let ptr;
                 let base;
+
+                let mut rtstore = self.rtstore.lock().unwrap();
+
+                // Initialize runtime environment
+                rt.guest_save[crate::translation::rtstore_reg() as usize] = rtstore.as_mut_ptr() as u64;
 
                 {
                     let executor = translation.backing.reader();
