@@ -7,7 +7,7 @@ use crate::tcache::TranslationCache;
 use std::collections::BTreeMap;
 
 pub struct SectionRegistry {
-    sections: BTreeMap<u64, SectionData>,
+    pub sections: BTreeMap<u64, SectionData>,
     threads: BTreeMap<u64, ThreadLocal>,
 }
 
