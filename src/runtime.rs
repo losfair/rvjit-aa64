@@ -15,7 +15,7 @@ pub struct Runtime {
     error_data: u64,
     error_reason: u64,
     exception_entry: unsafe extern "C" fn () -> !,
-    memory_regs: [u64; 4],
+    memory_regs: [u64; 8],
     spill: [u64; 32], // FIXME: only the first 256 bytes of Runtime are directly addressable so latter spill locations may not be accessible
     guest_save: [u64; 32],
 
@@ -41,7 +41,7 @@ impl Runtime {
     }
 
     pub const fn offset_spill() -> usize {
-        Self::offset_memory_regs() + 4 * 8
+        Self::offset_memory_regs() + 8 * 8
     }
 
     pub const fn offset_guest_save() -> usize {
@@ -55,7 +55,7 @@ impl Runtime {
             error_data: 0,
             error_reason: 0,
             exception_entry: crate::entry_exit::_rvjit_guest_exception,
-            memory_regs: [0; 4],
+            memory_regs: [0; 8],
             spill: [0; 32],
             guest_save: [0; 32],
 

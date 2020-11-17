@@ -1,9 +1,9 @@
-#offset_error_vpc: 0                                                                                                                                                                        │················
-#offset_error_reason: 8                                                                                                                                                                     │················
-#offset_exception_entry: 16                                                                                                                                                                 │················
-#offset_memory_regs: 24                                                                                                                                                                     │················
-#offset_spill: 56                                                                                                                                                                           │················
-#offset_guest_save: 312   
+#offset_error_data: 0
+#offset_error_reason: 8
+#offset_exception_entry: 16
+#offset_memory_regs: 24
+#offset_spill: 88
+#offset_guest_save: 344
 
 .macro SAVE_ONE reg, base, offset, index
     str \reg, [\base, #(\offset + (8 * \index))]
@@ -92,16 +92,16 @@ SAVE_REGS sp, 0
 
 mov x2, x0
 mov x30, x1
-add x2, x2, 312
+add x2, x2, 344
 LOAD_REGS_NO_X2_X30 x2, 0
-sub x2, x2, 312
+sub x2, x2, 344
 br x30
 
 .globl _rvjit_guest_exception
 _rvjit_guest_exception:
-add x2, x2, 312
+add x2, x2, 344
 SAVE_REGS x2, 0
-sub x2, x2, 312
+sub x2, x2, 344
 LOAD_REGS sp, 0
 add sp, sp, 32 * 8
 ret x30

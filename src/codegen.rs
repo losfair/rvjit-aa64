@@ -5,7 +5,10 @@ use std::rc::Rc;
 use crate::runtime::Runtime;
 use crate::error;
 use byteorder::{LittleEndian, ReadBytesExt};
-use crate::translation::{ExceptionPoint, VirtualReg, register_map_policy, Translation, JalrPatchPoint, LoadStorePatchPoint};
+use crate::translation::{
+    runtime_reg, rtstore_reg, trash_reg_w, zero_reg_r,
+    ExceptionPoint, VirtualReg, register_map_policy, Translation, JalrPatchPoint, LoadStorePatchPoint
+};
 use std::collections::BTreeMap;
 use log::debug;
 
@@ -19,6 +22,7 @@ pub struct Codegen<'a> {
     jalr_patch_points: BTreeMap<u32, JalrPatchPoint>,
     load_store_patch_points: BTreeMap<u32, LoadStorePatchPoint>,
     relative_br_labels: Box<[DynamicLabel]>,
+    rtstore_template: Vec<u64>,
 }
 
 impl<'a> Codegen<'a> {
@@ -38,6 +42,7 @@ impl<'a> Codegen<'a> {
             jalr_patch_points: BTreeMap::new(),
             load_store_patch_points: BTreeMap::new(),
             relative_br_labels,
+            rtstore_template: Vec::new(),
         }
     }
 
@@ -109,6 +114,7 @@ impl<'a> Codegen<'a> {
             exception_points: self.exception_points,
             jalr_patch_points: self.jalr_patch_points,
             load_store_patch_points: self.load_store_patch_points,
+            rtstore_template: self.rtstore_template,
         }
     }
 
@@ -1225,6 +1231,8 @@ impl SpillMachine {
 
         // No spill
         spilled_regs.set_bit(2, true);
+        spilled_regs.set_bit(26, true);
+        spilled_regs.set_bit(27, true);
         spilled_regs.set_bit(28, true);
         spilled_regs.set_bit(29, true);
         spilled_regs.set_bit(30, true);
@@ -1484,18 +1492,6 @@ pub(crate) fn ld_simm32<A: DynasmApi>(a: &mut A, rd: usize, imm: u32) {
         ; movk X(rd as u32), ((imm >> 16) & 0xffff) as u32, lsl 16
         ; sxtw X(rd as u32), W(rd as u32)
     )
-}
-
-fn runtime_reg() -> usize {
-    2
-}
-
-fn zero_reg_r() -> usize {
-    28
-}
-
-fn trash_reg_w() -> usize {
-    29
 }
 
 struct TempSpillHandle {

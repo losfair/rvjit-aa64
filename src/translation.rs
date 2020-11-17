@@ -9,6 +9,7 @@ pub struct Translation {
     pub exception_points: BTreeMap<u32, ExceptionPoint>,
     pub jalr_patch_points: BTreeMap<u32, JalrPatchPoint>,
     pub load_store_patch_points: BTreeMap<u32, LoadStorePatchPoint>,
+    pub rtstore_template: Vec<u64>,
     pub backing: Assembler,
 }
 
@@ -201,16 +202,17 @@ pub enum VirtualReg {
 pub fn register_map_policy(x: usize) -> VirtualReg {
     use VirtualReg::*;
 
-    // Reserve x2 and x30
     match x {
         0 => Zero,
         1 => Native(0),
         2 => Native(1),
         3 => Memory(0),
         4 => Memory(1),
-        x if x >= 5 && x <= 29 => Native(x - 2),
-        30 => Memory(2),
-        31 => Memory(3),
+        x if x >= 5 && x <= 27 => Native(x - 2), // native x3-x25 available
+        28 => Memory(2),
+        29 => Memory(3),
+        30 => Memory(4),
+        31 => Memory(5),
         _ => unreachable!(),
     }
 }
@@ -221,4 +223,20 @@ unsafe fn flush_cache_range(start: usize, len: usize) {
         let addr = start + i;
         llvm_asm!("ic ivau, $0" :: "r"(addr) :: "volatile");
     }
+}
+
+pub const fn runtime_reg() -> u32 {
+    2
+}
+
+pub const fn rtstore_reg() -> u32 {
+    26
+}
+
+pub const fn zero_reg_r() -> usize {
+    28
+}
+
+pub const fn trash_reg_w() -> usize {
+    29
 }
