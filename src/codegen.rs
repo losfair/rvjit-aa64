@@ -105,6 +105,21 @@ impl<'a> Codegen<'a> {
         }
     }
 
+    fn check_signal(&mut self, voff: u32, temp_reg: u32) {
+        dynasm!(self.a
+            ; .arch aarch64
+            ; ldr W(temp_reg), [X(runtime_reg() as u32), Runtime::offset_signal() as u32]
+            ; cbz W(temp_reg), >ok
+        );
+
+        self.emit_exception(voff, error::ERROR_REASON_SIGNAL);
+
+        dynasm!(self.a
+            ; .arch aarch64
+            ; ok:
+        );
+    }
+
     fn prepare_rel_br(&mut self, voff: u32, offset: i32) -> Option<DynamicLabel> {
         let dst_voff = voff as u64 as i64 + offset as i64;
         if dst_voff < 0 {
@@ -119,19 +134,8 @@ impl<'a> Codegen<'a> {
         }
 
         if offset < 0 {
-            // Explicitly checked signals.
-            dynasm!(self.a
-                ; .arch aarch64
-                ; ldr w30, [X(runtime_reg() as u32), Runtime::offset_signal() as u32]
-                ; cbz w30, >ok
-            );
-
-            self.emit_exception(voff, error::ERROR_REASON_SIGNAL);
-
-            dynasm!(self.a
-                ; .arch aarch64
-                ; ok:
-            );
+            // Check signal on loop backedges.
+            self.check_signal(voff, 30);
         }
 
         let label = self.relative_br_labels[dst_offset as usize].clone();
@@ -568,6 +572,8 @@ impl<'a> Codegen<'a> {
     }
 
     fn emit_jalr(&mut self, voff: u32, raw_rd: u32, raw_rs: u32, imm: u32) {
+        self.check_signal(voff, 30);
+
         let (rd, rs, rd_h, rs_h) = self.spill.map_register_tuple_w_r(&mut self.a, raw_rd as _, raw_rs as _);
 
         ld_simm16(&mut self.a, 30, imm);
