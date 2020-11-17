@@ -60,8 +60,27 @@ impl MtRuntime {
         self.section_registry.read().unwrap()
     }
 
+    pub fn with_memory<F: FnOnce(*const [u8]) -> R, R>(&self, start: u64, len: Option<usize>, f: F) -> Result<R, ExecError> {
+        let registry = self.section_registry.read().unwrap();
+        let (base_v, section) = registry.lookup_section(start)?;
+        let ro = unsafe { &*section.get() };
+        let m = &ro[(start - base_v) as usize..];
+
+        let m = if let Some(len) = len {
+            if m.len() < len {
+                return Err(ExecError::BadMemDerefAddr);
+            }
+            &m[..len]
+        } else {
+            m
+        };
+
+        // Still pass a raw pointer to the callback, since multiple mutable references can be created
+        // and we want the user to be aware of it.
+        Ok(f(m))
+    }
+
     pub fn with_memory_mut<F: FnOnce(*mut [u8]) -> R, R>(&self, start: u64, len: Option<usize>, f: F) -> Result<R, ExecError> {
-        // TODO: Make `Section` private so we can safely do r/w dereferences.
         let registry = self.section_registry.read().unwrap();
         let (base_v, section) = registry.lookup_section(start)?;
         let rw = if let Some(x) = section.get_mut() {
