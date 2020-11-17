@@ -18,6 +18,10 @@ use std::pin::Pin;
 pub struct MtRuntime {
     signal_handles: Mutex<BTreeSet<*const Cell<u32>>>,
     section_registry: RwLock<SectionRegistry>,
+
+    /// A mutex that should be taken by the thread that wants to take `signal_handles`,
+    /// before calling `set_stop_all_threads`.
+    signal_acquired: RwLock<()>,
 }
 
 unsafe impl Send for MtRuntime {}
@@ -46,12 +50,15 @@ impl MtRuntime {
         Arc::new(Self {
             signal_handles: Mutex::new(BTreeSet::new()),
             section_registry: RwLock::new(SectionRegistry::new(init_tid)),
+            signal_acquired: RwLock::new(()),
         })
     }
 
     pub fn write_section_registry<'a>(&'a self) -> RwLockWriteGuard<'a, SectionRegistry> {
+        let _acq = self.signal_acquired.write().unwrap();
         self.set_stop_all_threads();
         let x = self.section_registry.write().unwrap();
+        drop(_acq);
         self.clear_stop_all_threads();
         x
     }
@@ -292,8 +299,6 @@ impl Runtime {
     }
 
     fn handle_exit(&mut self, exc_offset: u32, reason: u16) -> Result<(), ExecError> {
-        let mt = self.mt.clone();
-        let mut registry = mt.write_section_registry();
 
         match reason {
             error::ERROR_REASON_UNDEFINED_INSTRUCTION => {
@@ -303,6 +308,9 @@ impl Runtime {
                 Err(ExecError::BranchOob)
             }
             error::ERROR_REASON_JALR_MISS => {
+                let mt = self.mt.clone();
+                let mut registry = mt.write_section_registry();
+
                 let (base_v, section) = registry.lookup_section(self.vpc)?;
                 let translation = section.get_translation()?.clone();
 
@@ -338,6 +346,9 @@ impl Runtime {
                 Err(ExecError::Retry)
             }
             error::ERROR_REASON_LOAD_STORE_MISS => {
+                let mt = self.mt.clone();
+                let mut registry = mt.write_section_registry();
+
                 let (base_v, section) = registry.lookup_section(self.vpc)?;
                 let translation = section.get_translation()?.clone();
 
@@ -377,6 +388,9 @@ impl Runtime {
                 Err(ExecError::Ebreak)
             }
             error::ERROR_REASON_SIGNAL => {
+                // don't race section_registry with the signal sender
+                self.mt.signal_acquired.read().unwrap();
+
                 Err(ExecError::InterruptSignal)
             }
             _ => {
