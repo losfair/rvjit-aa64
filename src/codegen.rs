@@ -49,7 +49,6 @@ impl<'a> Codegen<'a> {
         let mut cursor = self.raw;
         let mut voff: u32 = 0;
 
-        let mut acc_size: usize = 0;
         while let Ok(x) = cursor.read_u16::<LittleEndian>() {
             let inst_offset = (voff / 2) as usize;
             let label = self.relative_br_labels[inst_offset];
@@ -91,17 +90,7 @@ impl<'a> Codegen<'a> {
 
                 voff += 2;
             }
-
-            let asm_offset = self.a.offset().0;
-
-            // Interval selected as Bcc max range - 1024.
-            if asm_offset - acc_size >= 1048576 - 1024 {
-                self.emit_periodic_tail();
-                acc_size = asm_offset;
-            }
         }
-
-        self.emit_periodic_tail();
     }
 
     pub fn refine(self) -> Translation {
@@ -1205,7 +1194,10 @@ impl<'a> Codegen<'a> {
 
         dynasm!(self.a
             ; .arch aarch64
-            ; bl >tail_exception_exit
+
+            ; str W(trash_reg_w() as u32), [X(runtime_reg() as u32), Runtime::offset_error_reason() as u32]
+            ; ldr X(trash_reg_w() as u32), [X(runtime_reg() as u32), Runtime::offset_exception_entry() as u32]
+            ; blr X(trash_reg_w() as u32)
         );
         let translation_offset = self.a.offset().0 as u32;
         let spill_mask = self.spill.spilled_regs.get();
@@ -1213,20 +1205,6 @@ impl<'a> Codegen<'a> {
             v_offset: voff,
             spill_mask,
         });
-    }
-
-    fn emit_periodic_tail(&mut self) {
-        dynasm!(self.a
-            ; .arch aarch64
-            ; b >after
-
-            ; tail_exception_exit:
-            ; str W(trash_reg_w() as u32), [X(runtime_reg() as u32), Runtime::offset_error_reason() as u32]
-            ; ldr X(trash_reg_w() as u32), [X(runtime_reg() as u32), Runtime::offset_exception_entry() as u32]
-            ; br X(trash_reg_w() as u32)
-
-            ; after:
-        );
     }
 
     fn emit_ud(&mut self, voff: u32) {
