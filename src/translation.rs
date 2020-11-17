@@ -16,6 +16,7 @@ pub struct Translation {
 pub struct ExceptionPoint {
     pub v_offset: u32,
     pub spill_mask: u32,
+    pub reason: u16,
 }
 
 #[derive(Copy, Clone, Debug)]

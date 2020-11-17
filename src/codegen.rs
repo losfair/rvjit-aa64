@@ -118,6 +118,22 @@ impl<'a> Codegen<'a> {
             return None;
         }
 
+        if offset < 0 {
+            // Explicitly checked signals.
+            dynasm!(self.a
+                ; .arch aarch64
+                ; ldr w30, [X(runtime_reg() as u32), Runtime::offset_signal() as u32]
+                ; cbz w30, >ok
+            );
+
+            self.emit_exception(voff, error::ERROR_REASON_SIGNAL);
+
+            dynasm!(self.a
+                ; .arch aarch64
+                ; ok:
+            );
+        }
+
         let label = self.relative_br_labels[dst_offset as usize].clone();
         Some(label)
     }
@@ -1208,20 +1224,18 @@ impl<'a> Codegen<'a> {
     fn emit_exception(&mut self, voff: u32, reason: u16) {
         //debug!("static exception @ 0x{:016x}: reason {}", voff, reason);
 
-        ld_simm16(&mut self.a, trash_reg_w() as _, reason as u32);
-
         dynasm!(self.a
             ; .arch aarch64
 
-            ; str W(trash_reg_w() as u32), [X(runtime_reg() as u32), Runtime::offset_error_reason() as u32]
-            ; ldr X(trash_reg_w() as u32), [X(runtime_reg() as u32), Runtime::offset_exception_entry() as u32]
-            ; blr X(trash_reg_w() as u32)
+            ; ldr x30, [X(runtime_reg() as u32), Runtime::offset_exception_entry() as u32]
+            ; blr x30
         );
         let translation_offset = self.a.offset().0 as u32;
         let spill_mask = self.spill.spilled_regs.get();
         self.exception_points.insert(translation_offset, ExceptionPoint {
             v_offset: voff,
             spill_mask,
+            reason,
         });
     }
 

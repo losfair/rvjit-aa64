@@ -110,7 +110,7 @@ impl MtRuntime {
 #[repr(C)]
 pub struct Runtime {
     error_data: u64,
-    error_reason: u32,
+    _error_reason: u32,
     signal: Cell<u32>,
     exception_entry: unsafe extern "C" fn () -> !,
     memory_regs: [u64; 7],
@@ -173,7 +173,7 @@ impl Runtime {
     pub fn new(mt: Arc<MtRuntime>, tid: u64) -> Box<Self> {
         let rt = Box::new(Self {
             error_data: 0,
-            error_reason: 0,
+            _error_reason: 0,
             signal: Cell::new(0),
             exception_entry: crate::entry_exit::_rvjit_guest_exception,
             memory_regs: [0; 7],
@@ -203,10 +203,6 @@ impl Runtime {
                 _ => return Err(e)
             }
         }
-    }
-
-    pub fn error_reason(&self) -> u16 {
-        self.error_reason as u16
     }
 
     pub fn read_register(&self, index: usize) -> u64 {
@@ -285,7 +281,7 @@ impl Runtime {
 
         drop(registry_r);
 
-        match self.handle_exit(exc_offset) {
+        match self.handle_exit(exc_offset, exc_point.reason) {
             Ok(_) => {
                 panic!("unexpected Ok from handle_exit");
             }
@@ -295,11 +291,11 @@ impl Runtime {
         }
     }
 
-    fn handle_exit(&mut self, exc_offset: u32) -> Result<(), ExecError> {
+    fn handle_exit(&mut self, exc_offset: u32, reason: u16) -> Result<(), ExecError> {
         let mt = self.mt.clone();
         let mut registry = mt.write_section_registry();
 
-        match self.error_reason as u16 {
+        match reason {
             error::ERROR_REASON_UNDEFINED_INSTRUCTION => {
                 Err(ExecError::UndefinedInstruction)
             }
@@ -380,8 +376,11 @@ impl Runtime {
                 self.vpc += 4;
                 Err(ExecError::Ebreak)
             }
+            error::ERROR_REASON_SIGNAL => {
+                Err(ExecError::InterruptSignal)
+            }
             _ => {
-                panic!("Unknown error reason: {}", self.error_reason);
+                panic!("Unknown error reason: {}", reason);
             }
         }
 

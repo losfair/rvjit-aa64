@@ -49,6 +49,9 @@ pub enum ExecError {
 
     #[error("bad memory dereference flags")]
     BadMemDerefFlags,
+
+    #[error("interrupt signal")]
+    InterruptSignal,
 }
 
 pub(crate) const ERROR_REASON_UNDEFINED_INSTRUCTION: u16 = 1;
@@ -57,3 +60,4 @@ pub(crate) const ERROR_REASON_JALR_MISS: u16 = 3;
 pub(crate) const ERROR_REASON_LOAD_STORE_MISS: u16 = 4;
 pub(crate) const ERROR_REASON_ECALL: u16 = 5;
 pub(crate) const ERROR_REASON_EBREAK: u16 = 6;
+pub(crate) const ERROR_REASON_SIGNAL: u16 = 7;
