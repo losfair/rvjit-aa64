@@ -22,6 +22,7 @@ fn main() {
 
     let mut mrt = MtRuntime::new(1);
     let mut rt = Runtime::new(mrt.clone(), 1);
+    rt.log_perf = true;
     let mut elf_image_file = File::open(&path).unwrap();
     let mut elf_image = vec![0u8; 0];
     elf_image_file.read_to_end(&mut elf_image).unwrap();

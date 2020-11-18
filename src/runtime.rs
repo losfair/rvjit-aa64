@@ -121,6 +121,12 @@ struct RasEntry {
     real: u64,
 }
 
+#[derive(Debug, Default)]
+pub struct PerfStats {
+    pub last_entry: Option<SystemTime>,
+    pub last_exit: Option<SystemTime>,
+}
+
 #[repr(C)]
 pub struct Runtime {
     error_data: u64,
@@ -142,6 +148,8 @@ pub struct Runtime {
     pub vpc: u64,
     mt: Arc<MtRuntime>,
     tid: u64,
+    pub perf: PerfStats,
+    pub log_perf: bool,
 
     /// A runtime cannot be moved since its `signal` address is kept in `mt`.
     _pin: PhantomPinned,
@@ -210,6 +218,8 @@ impl Runtime {
             vpc: 0,
             mt: mt.clone(),
             tid,
+            perf: PerfStats::default(),
+            log_perf: false,
             _pin: PhantomPinned,
         });
 
@@ -291,9 +301,17 @@ impl Runtime {
 
         let base = translation.backing.ptr(AssemblyOffset(0)) as u64;
         let ptr = translation.backing.ptr(AssemblyOffset(real_offset as _)) as u64;
+
+        self.perf.last_entry = Some(SystemTime::now());
+        if let Some(last_exit) = self.perf.last_exit {
+            if self.log_perf {
+                log::info!("perf: exit->entry took {:?}", self.perf.last_entry.unwrap().duration_since(last_exit));
+            }
+        }
         unsafe {
             crate::entry_exit::_rvjit_enter_guest(self, ptr);
         }
+        self.perf.last_exit = Some(SystemTime::now());
 
         let exc_offset = (self.guest_save[30] - base) as u32;
         let exc_point = translation.get_exception_point(exc_offset).expect("Runtime::run_section: cannot find exception point");
