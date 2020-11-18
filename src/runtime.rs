@@ -228,10 +228,18 @@ impl Runtime {
     }
 
     pub fn run(&mut self) -> Result<(), ExecError> {
+        self.run_with_rlocked(|_| Ok(()))
+    }
+
+    /// TODO: Document why this is needed
+    pub fn run_with_rlocked<F: FnMut(&mut Self) -> Result<(), E>, E>(&mut self, mut after_rlock: F) -> Result<E, ExecError> {
         self.vpc &= !1u64; // to match the behavior of JIT
 
         loop {
-            let e = self.run_section().unwrap_err();
+            let e = match self.run_section(&mut after_rlock) {
+                Ok(e) => return Ok(e),
+                Err(e) => e,
+            };
             match e {
                 ExecError::Retry => {
                     
@@ -239,6 +247,10 @@ impl Runtime {
                 _ => return Err(e)
             }
         }
+    }
+
+    pub fn tid(&self) -> u64 {
+        self.tid
     }
 
     pub fn read_register(&self, index: usize) -> u64 {
@@ -282,9 +294,14 @@ impl Runtime {
         }
     }
 
-    pub fn run_section(&mut self) -> Result<(), ExecError> {
+    fn run_section<F: FnMut(&mut Self) -> Result<(), E>, E>(&mut self, after_rlock: &mut F) -> Result<E, ExecError> {
         let mt = self.mt.clone();
         let registry_r = mt.section_registry.read().unwrap();
+
+        if let Err(e) = after_rlock(self) {
+            return Ok(e);
+        }
+
         let (base_v, section) = registry_r.lookup_section(self.vpc)?;
         let translation = section.get_translation()?;
         let v_offset = (self.vpc - base_v) as u32;
