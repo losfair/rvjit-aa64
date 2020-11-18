@@ -250,36 +250,7 @@ impl<'a> Codegen<'a> {
             0b1101111 => {
                 // jal
                 let imm = i_jtype_imm(inst);
-                let label = match self.prepare_rel_br(voff, imm as i32) {
-                    Some(x) => x,
-                    None => return
-                };
-                
-                let (rd, rd_h) = self.spill.map_register_w(&mut self.a, i_rd(inst) as _, &[]);
-                self.load_vpc(voff + 4, rd as _, 30);
-
-                #[cfg(feature = "ras")]
-                {
-                    if i_rd(inst) == 1 {
-                        dynasm!(self.a
-                            ; .arch aarch64
-                            ; add X(trash_reg_w() as u32), X(runtime_reg() as u32), Runtime::offset_ras() as u32
-                            ; add X(trash_reg_w() as u32), X(trash_reg_w() as u32), X(ras_reg()), lsl 4
-                            ; adr X(temp1_reg()), >after // real pc
-                            ; stp X(rd as u32), X(temp1_reg()), [X(trash_reg_w() as u32)] // (link_vpc, link_real_pc)
-                            ; add X(ras_reg()), X(ras_reg()), 1
-                            ; and X(ras_reg()), X(ras_reg()), 0b111111 // 64 entries
-                        );
-                    }
-                }
-
-                self.spill.release_register_w(&mut self.a, rd_h);
-
-                dynasm!(self.a
-                    ; .arch aarch64
-                    ; b =>label
-                    ; after:
-                );
+                self.emit_jal(voff, i_rd(inst) as _, imm)
             }
             0b1100111 => {
                 // jalr
@@ -586,6 +557,39 @@ impl<'a> Codegen<'a> {
 
         self.spill.release_register_r(&mut self.a, rs_h);
         self.spill.release_register_r(&mut self.a, rt_h);
+    }
+
+    fn emit_jal(&mut self, voff: u32, raw_rd: u32, imm: u32) {
+        let label = match self.prepare_rel_br(voff, imm as i32) {
+            Some(x) => x,
+            None => return
+        };
+        
+        let (rd, rd_h) = self.spill.map_register_w(&mut self.a, raw_rd as _, &[]);
+        self.load_vpc(voff + 4, rd as _, 30);
+
+        #[cfg(feature = "ras")]
+        {
+            if raw_rd == 1 {
+                dynasm!(self.a
+                    ; .arch aarch64
+                    ; add X(trash_reg_w() as u32), X(runtime_reg() as u32), Runtime::offset_ras() as u32
+                    ; add X(trash_reg_w() as u32), X(trash_reg_w() as u32), X(ras_reg()), lsl 4
+                    ; adr X(temp1_reg()), >after // real pc
+                    ; stp X(rd as u32), X(temp1_reg()), [X(trash_reg_w() as u32)] // (link_vpc, link_real_pc)
+                    ; add X(ras_reg()), X(ras_reg()), 1
+                    ; and X(ras_reg()), X(ras_reg()), 0b111111 // 64 entries
+                );
+            }
+        }
+
+        self.spill.release_register_w(&mut self.a, rd_h);
+
+        dynasm!(self.a
+            ; .arch aarch64
+            ; b =>label
+            ; after:
+        );
     }
 
     fn emit_jalr(&mut self, voff: u32, raw_rd: u32, raw_rs: u32, imm: u32) {
