@@ -28,6 +28,19 @@ impl SectionRegistry {
         }
     }
 
+    pub fn clone_thread(&mut self, src_tid: u64, dst_tid: u64) -> Result<(), ExecError> {
+        if self.threads.contains_key(&dst_tid) {
+            return Err(ExecError::BadThread);
+        }
+
+        let local = match self.threads.get(&src_tid) {
+            Some(th) => th.clone(),
+            None => return Err(ExecError::BadThread),
+        };
+        self.threads.insert(dst_tid, local);
+        Ok(())
+    }
+
     pub fn get_thread_rtstore(&self, tid: u64, base_v: u64) -> Result<&[u64], ExecError> {
         match self.threads.get(&tid) {
             Some(th) => {
