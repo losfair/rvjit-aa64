@@ -21,3 +21,7 @@ env_logger = "0.8"
 xmas-elf = "0.7"
 lru_time_cache = "0.11"
 blake2 = "0.9"
+
+[features]
+default = ["ras"]
+ras = []

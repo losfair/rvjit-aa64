@@ -6,7 +6,7 @@ use crate::runtime::Runtime;
 use crate::error;
 use byteorder::{LittleEndian, ReadBytesExt};
 use crate::translation::{
-    runtime_reg, rtstore_reg, trash_reg_w, zero_reg_r, temp1_reg,
+    runtime_reg, rtstore_reg, trash_reg_w, zero_reg_r, temp1_reg, ras_reg,
     ExceptionPoint, VirtualReg, register_map_policy, Translation, JalrPatchPoint, LoadStorePatchPoint,
     RtSlot,
 };
@@ -576,6 +576,26 @@ impl<'a> Codegen<'a> {
 
         let (rd, rs, rd_h, rs_h) = self.spill.map_register_tuple_w_r(&mut self.a, raw_rd as _, raw_rs as _);
 
+        // Return fast path: RAS
+        #[cfg(feature = "ras")]
+        {
+            if raw_rs == 1 && raw_rd == 0 && imm == 0 {
+                dynasm!(self.a
+                    ; .arch aarch64
+                    ; sub X(ras_reg()), X(ras_reg()), 1
+                    ; and X(ras_reg()), X(ras_reg()), 0b111111 // 64 entries
+                    ; add x30, X(runtime_reg() as u32), Runtime::offset_ras() as u32
+                    ; add x30, x30, X(ras_reg()), lsl 4 // compute effective address
+                    ; ldp x30, X(temp1_reg()), [x30] // (v, real)
+                    ; cbz X(temp1_reg()), >fail // check empty entries
+                    ; cmp X(rs as u32), x30
+                    ; b.ne >fail
+                    ; br X(temp1_reg())
+                    ; fail:
+                );
+            }
+        }
+
         ld_simm16(&mut self.a, 30, imm);
         dynasm!(self.a
             ; .arch aarch64
@@ -654,12 +674,30 @@ impl<'a> Codegen<'a> {
         // Still need to find a fix.
         self.load_vpc(voff + 4, rd as _, temp1_reg());
 
+        // Call path: RAS
+        // Can't use x30 here
+        #[cfg(feature = "ras")]
+        {
+            if raw_rd == 1 {
+                dynasm!(self.a
+                    ; .arch aarch64
+                    ; add X(trash_reg_w() as u32), X(runtime_reg() as u32), Runtime::offset_ras() as u32
+                    ; add X(trash_reg_w() as u32), X(trash_reg_w() as u32), X(ras_reg()), lsl 4
+                    ; adr X(temp1_reg()), >after // real pc
+                    ; stp X(rd as u32), X(temp1_reg()), [X(trash_reg_w() as u32)] // (link_vpc, link_real_pc)
+                    ; add X(ras_reg()), X(ras_reg()), 1
+                    ; and X(ras_reg()), X(ras_reg()), 0b111111 // 64 entries
+                );
+            }
+        }
+
         self.spill.release_register_r(&mut self.a, rs_h);
         self.spill.release_register_w(&mut self.a, rd_h);
 
         dynasm!(self.a
             ; .arch aarch64
             ; br x30
+            ; after:
         );
     }
 

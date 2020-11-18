@@ -115,6 +115,13 @@ impl MtRuntime {
 }
 
 #[repr(C)]
+#[derive(Default, Copy, Clone)]
+struct RasEntry {
+    v: u64,
+    real: u64,
+}
+
+#[repr(C)]
 pub struct Runtime {
     error_data: u64,
     _error_reason: u32,
@@ -128,7 +135,9 @@ pub struct Runtime {
     /// Return Address Stack. Holds machine (real) addresses.
     /// 
     /// Not directly addressable - needs `add`.
-    ras: [u64; 64],
+    /// 
+    /// Length directly used in JIT - keep them in sync.
+    ras: [RasEntry; 64],
 
     pub vpc: u64,
     mt: Arc<MtRuntime>,
@@ -196,7 +205,7 @@ impl Runtime {
             current_vbase: 0,
             spill: [0; 32],
             guest_save: [0; 32],
-            ras: [0; 64],
+            ras: [RasEntry::default(); 64],
 
             vpc: 0,
             mt: mt.clone(),
