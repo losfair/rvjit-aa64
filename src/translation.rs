@@ -147,11 +147,14 @@ pub fn register_map_policy(x: usize) -> VirtualReg {
         2 => Native(1),
         3 => Memory(0),
         4 => Memory(1),
-        x if x >= 5 && x <= 27 => Native(x - 2), // native x3-x25 available
-        28 => Memory(2),
-        29 => Memory(3),
-        30 => Memory(4),
-        31 => Memory(5),
+        5 => Native(3),
+        6 => Native(4),
+        7 => Memory(6), // t2
+        x if x >= 8 && x <= 27 => Native(x - 3), // native x5-x24 available
+        28 => Memory(2), // t3
+        29 => Memory(3), // t4
+        30 => Memory(4), // t5
+        31 => Memory(5), // t6
         _ => unreachable!(),
     }
 }
@@ -166,6 +169,10 @@ unsafe fn flush_cache_range(start: usize, len: usize) {
 
 pub const fn runtime_reg() -> u32 {
     2
+}
+
+pub const fn ras_reg() -> u32 {
+    25
 }
 
 pub const fn rtstore_reg() -> u32 {

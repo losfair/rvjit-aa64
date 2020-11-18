@@ -125,6 +125,11 @@ pub struct Runtime {
     spill: [u64; 32], // FIXME: only the first 256 bytes of Runtime are directly addressable so latter spill locations may not be accessible
     guest_save: [u64; 32],
 
+    /// Return Address Stack. Holds machine (real) addresses.
+    /// 
+    /// Not directly addressable - needs `add`.
+    ras: [u64; 64],
+
     pub vpc: u64,
     mt: Arc<MtRuntime>,
     tid: u64,
@@ -171,6 +176,10 @@ impl Runtime {
     pub const fn offset_guest_save() -> usize {
         Self::offset_spill() + 32 * 8
     }
+
+    pub const fn offset_ras() -> usize {
+        Self::offset_guest_save() + 32 * 8
+    }
 }
 
 impl Runtime {
@@ -187,6 +196,7 @@ impl Runtime {
             current_vbase: 0,
             spill: [0; 32],
             guest_save: [0; 32],
+            ras: [0; 64],
 
             vpc: 0,
             mt: mt.clone(),

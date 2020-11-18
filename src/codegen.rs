@@ -1260,6 +1260,7 @@ impl SpillMachine {
 
         // No spill
         spilled_regs.set_bit(2, true);
+        spilled_regs.set_bit(25, true);
         spilled_regs.set_bit(26, true);
         spilled_regs.set_bit(27, true);
         spilled_regs.set_bit(28, true);
